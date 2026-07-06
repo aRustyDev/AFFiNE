@@ -1,0 +1,19 @@
+# Build context filter for woven.Dockerfile (pass via: docker build -f scripts/woven.Dockerfile
+# with DOCKER_BUILDKIT and this file referenced as .dockerignore, or copy to repo root).
+# Everything is rebuilt inside the image, so drop heavy/derived/host-arch artifacts.
+**/node_modules
+**/dist
+**/lib
+**/*.node
+.git
+.github
+target
+**/target
+.docker
+.beads
+scripts/.woven-rehearsed
+scripts/woven-*.env
+tests
+**/*.log
+.yarn/cache
+.yarn/install-state.gz

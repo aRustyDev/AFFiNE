@@ -1,0 +1,88 @@
+# Persistent, ISOLATED staging stack for woven-promote.sh — a full prod-parity
+# rehearsal of an AFFiNE release before it touches the live woven-local stack.
+# Parity: indexer ON (manticore), same image as prod. Isolation: own project
+# (-p affine_staging), own volumes/bind roots, published ports 3020/5442/6389,
+# NO container_name (so it can never collide with live/disposable/drill stacks).
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    volumes:
+      - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_DATABASE:-affine}
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    ports:
+      - '${STAGING_PG_PORT:-5442}:5432'
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-U', "${DB_USERNAME}", '-d', "${DB_DATABASE:-affine}"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis
+    ports:
+      - '${STAGING_REDIS_PORT:-6389}:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', '--raw', 'incr', 'ping']
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  manticore:
+    image: manticoresearch/manticore:10.1.0
+    volumes:
+      - manticore-data:/var/lib/manticore
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://localhost:9308']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  affine_migration:
+    image: ${AFFINE_IMAGE:-ghcr.io/toeverything/affine:stable}
+    command: ['sh', '-c', 'node ./scripts/self-host-predeploy.js']
+    volumes:
+      - ${UPLOAD_LOCATION}:/root/.affine/storage
+      - ${CONFIG_LOCATION}:/root/.affine/config
+    environment:
+      - REDIS_SERVER_HOST=redis
+      - DATABASE_URL=postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres:5432/${DB_DATABASE:-affine}
+      - AFFINE_INDEXER_ENABLED=true
+      - AFFINE_INDEXER_SEARCH_PROVIDER=manticoresearch
+      - AFFINE_INDEXER_SEARCH_ENDPOINT=http://manticore:9308
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      manticore:
+        condition: service_healthy
+
+  affine:
+    image: ${AFFINE_IMAGE:-ghcr.io/toeverything/affine:stable}
+    ports:
+      - '${STAGING_PORT:-3020}:3010'
+    volumes:
+      - ${UPLOAD_LOCATION}:/root/.affine/storage
+      - ${CONFIG_LOCATION}:/root/.affine/config
+    environment:
+      - REDIS_SERVER_HOST=redis
+      - DATABASE_URL=postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres:5432/${DB_DATABASE:-affine}
+      - AFFINE_INDEXER_ENABLED=true
+      - AFFINE_INDEXER_SEARCH_PROVIDER=manticoresearch
+      - AFFINE_INDEXER_SEARCH_ENDPOINT=http://manticore:9308
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      manticore:
+        condition: service_healthy
+      affine_migration:
+        condition: service_completed_successfully
+
+volumes:
+  manticore-data:

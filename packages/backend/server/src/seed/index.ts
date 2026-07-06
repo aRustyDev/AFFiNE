@@ -2,6 +2,7 @@ import '../prelude';
 
 import { PrismaClient } from '@prisma/client';
 
+import { seedWovenWorkspace } from '../__tests__/fixtures/woven-workspace';
 import { createFactory, Mockers } from '../__tests__/mocks';
 
 const client = new PrismaClient();
@@ -22,24 +23,52 @@ $ seed User feature=pro_plan_v1              Create an User with Pro feature
 $ seed TeamWorkspace id=xxx                  Seed a workspace with Team feature
 $ seed Workspace id=xxx public=true          Seed with boolean property
 $ seed TeamWorkspace id=xxx quantity=10n     Seed with numberic property, use \`={num}n\` suffix
+
+WOVEN FORK-LOCAL composite (see __tests__/fixtures/woven-workspace.ts):
+
+$ seed WovenWorkspace                         Owner + default members, one root-doc workspace
+$ seed WovenWorkspace members=8n              Owner + 8 members (exercises seat-limit removal)
+$ seed WovenWorkspace id=xxx email=a@b.co     Deterministic workspace id + owner email
 `);
   process.exit(0);
 }
 
-const name = args.shift() as keyof typeof Mockers;
-const Mocker = Mockers[name];
-
-if (!name || !Mocker) {
-  throw new Error(
-    'First argument must be one of: ' + JSON.stringify(Object.keys(Mockers))
-  );
-}
+const name = args.shift() as string;
 
 const create = createFactory(client, {
   logger: (val: any) => {
     console.log(`${name} ${JSON.stringify(val)}`);
   },
 });
+
+// WOVEN FORK-LOCAL composite: not a single Mocker, so intercept before the
+// registry lookup. Shares the exact helper the fork e2e asserts against.
+if (name === 'WovenWorkspace') {
+  const { overrides = {} } = parseArgs(args);
+  const fixture = await seedWovenWorkspace(create, {
+    memberCount:
+      typeof overrides.members === 'number' ? overrides.members : undefined,
+    workspaceId: typeof overrides.id === 'string' ? overrides.id : undefined,
+    ownerEmail: typeof overrides.email === 'string' ? overrides.email : undefined,
+  });
+  console.log(
+    `WovenWorkspace seeded ${JSON.stringify({
+      workspaceId: fixture.workspace.id,
+      owner: fixture.owner.email,
+      seats: fixture.seats,
+    })}`
+  );
+  process.exit(0);
+}
+
+const Mocker = Mockers[name as keyof typeof Mockers];
+
+if (!name || !Mocker) {
+  throw new Error(
+    'First argument must be one of: ' +
+      JSON.stringify([...Object.keys(Mockers), 'WovenWorkspace'])
+  );
+}
 
 function parseArgs(args: string[]) {
   if (!args.length) {
