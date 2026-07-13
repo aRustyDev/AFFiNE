@@ -56,9 +56,10 @@ jobs:
                       /opt/hostedtoolcache/CodeQL /usr/local/.ghcup || true
           df -h /
 
-      - name: Use the woven build-context ignore
-        run: cp scripts/woven.dockerignore .dockerignore
-
+      # Build context is filtered by the committed root .dockerignore (keeps the
+      # tests/*, blocksuite/**, packages/*, tools/* workspaces yarn --immutable
+      # needs; drops node_modules/.git/target). NOT scripts/woven.dockerignore,
+      # which excludes tests/ and would drop 8 workspace package.json (-> YN0028).
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
