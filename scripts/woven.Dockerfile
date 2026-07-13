@@ -57,8 +57,17 @@ RUN rm -f packages/backend/native/server-native*.node \
          [ -d "$d" ] || { echo "FATAL: build produced no $d (swallowed rspack error above?)"; exit 1; }; \
        done
 # Production node_modules focused on the server, then folded into the server pkg
-# (mirrors CI build-images.yml).
-RUN corepack yarn config set --json supportedArchitectures.cpu '["arm64"]' \
+# (mirrors CI build-images.yml). The yarn CPU arch derives from TARGETARCH so this
+# file builds for both amd64 (ds-cleaner cluster) and arm64 (local) — docker-clean
+# already maps amd64->x64 for the server-native binary name.
+ARG TARGETARCH
+RUN case "$TARGETARCH" in \
+      amd64) YARN_CPU=x64 ;; \
+      arm64) YARN_CPU=arm64 ;; \
+      arm)   YARN_CPU=arm ;; \
+      *) echo "woven.Dockerfile: unsupported TARGETARCH='$TARGETARCH'" >&2; exit 1 ;; \
+    esac \
+    && corepack yarn config set --json supportedArchitectures.cpu "[\"$YARN_CPU\"]" \
     && corepack yarn config set --json supportedArchitectures.libc '["glibc"]' \
     && corepack yarn workspaces focus @affine/server --production \
     && corepack yarn workspace @affine/server prisma generate \

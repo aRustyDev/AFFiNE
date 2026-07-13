@@ -1,0 +1,88 @@
+name: woven-publish-image
+
+# Fork-local (woven-* namespaced), rebase-safe: does NOT edit upstream
+# build-images.yml / release.yml. Builds the community self-host server image from
+# scripts/woven.Dockerfile (single monolithic from-source build; NO proprietary
+# R2/Sentry/Perfsee/Captcha/AFFINE_PRO secrets) and, when push is enabled, pushes it
+# to ghcr.io/${owner}/affine. See .claude/plans/ghcr-image-publishing/PLAN.md
+# (beads epic affine-3ab).
+#
+# RUNG 2 (scratch CI, affine-3ab.1): BUILD-ONLY amd64 proof — push disabled by
+# default. Verifies the monolithic build fits a GitHub-hosted runner (RAM/disk/time).
+# The feat/* push trigger below is TEMPORARY for this scratch run.
+#
+# RUNG 3 (publish, affine-3ab.2/.3): switch the trigger to `push: branches:
+# [woven/main]` + workflow_dispatch, dispatch with push=true, and set the GHCR
+# package public with canonical :woven-<sha> + :woven tags.
+
+on:
+  workflow_dispatch:
+    inputs:
+      push:
+        description: 'Push the built image to GHCR (rung 3). Leave false for a build-only proof.'
+        type: boolean
+        default: false
+  push:
+    branches:
+      - feat/ghcr-image-publishing # TEMP scratch trigger (rung 2); remove for rung 3
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build self-host image (amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Compute image ref
+        id: ref
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}" # GHCR requires a lowercase owner
+          sha="$(git rev-parse --short HEAD)"
+          {
+            echo "owner=$owner"
+            echo "sha=$sha"
+            echo "image=ghcr.io/$owner/affine"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Reclaim runner disk (heavy monolithic build)
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL /usr/local/.ghcup || true
+          df -h /
+
+      - name: Use the woven build-context ignore
+        run: cp scripts/woven.dockerignore .dockerignore
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ inputs.push == true }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build self-host server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: scripts/woven.Dockerfile
+          platforms: linux/amd64
+          push: ${{ inputs.push == true }}
+          provenance: false
+          build-args: |
+            BUILD_TYPE=stable
+            APP_VERSION=woven-${{ steps.ref.outputs.sha }}
+          tags: ${{ steps.ref.outputs.image }}:woven-${{ steps.ref.outputs.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=woven-${{ steps.ref.outputs.sha }}
