@@ -36,18 +36,28 @@ echo "epic=$EP A0=$A0 A1=$A1 A2=$A2 A3=$A3"
 Then wire the infra side's `external_projects` so `external:affine:affine-ghcr-image`
 resolves (infra plan OQ-2).
 
-## OQ-1 — What actually breaks with the proprietary secrets empty?
+## OQ-1 — What actually breaks with the proprietary secrets empty? — RESOLVED 2026-07-13
+**Nothing.** A0 rungs 1+2 built web/admin/mobile/server clean with R2/Sentry/Perfsee/Captcha
+empty and `AFFINE_PRO_*` unset — no leg hard-failed, none needed gating/stubbing. See
+decision-log "Spike results". (Original text below.)
 A0 must prove the web/admin/server build succeeds with R2/Sentry/Perfsee/Captcha unset and
 without `AFFINE_PRO_*`. If a leg hard-fails on a missing secret, decide: stub it, gate the
 step behind `if: secrets.X != ''`, or provide a fork-owned equivalent.
 
-## OQ-2 — Reuse upstream reusable workflow, or fork the build steps?
+## OQ-2 — Reuse upstream reusable workflow, or fork the build steps? — RESOLVED 2026-07-13
+**Neither — reuse the fork's own `scripts/woven.Dockerfile`.** A single monolithic
+from-source build replaces the 5-job matrix, needs no registry parametrization and no
+`@toeverything` scope wiring, is already `woven-*`/rebase-safe, and fits a stock CI runner
+(~24 min). See decision-log "Spike results". (Original text below.)
 Calling `build-images.yml` needs it parametrized on registry owner (minimal edit, breaks
 the "don't edit upstream" rule of D2 unless upstreamable). Forking the ~5 build jobs into
 `woven-*` is self-contained but duplicates ~250 lines that drift from `canary`. A0 recommends.
 
 ## OQ-3 — Does `yarn workspaces focus @affine/server --production` resolve the
 `@toeverything` npm scope in the fork with only `GITHUB_TOKEN`? (Private-package risk.)
+**RESOLVED 2026-07-13: no token needed.** `.yarnrc.yml` targets public `registry.npmjs.org`
+with no scope override; `yarn install --immutable` + `workspaces focus` resolved everything
+with no npm auth in both A0 rungs.
 
 ## OQ-4 — Signing/provenance/SBOM.** Upstream sets `provenance: true`. Keep it (adds
 attestation) or drop for speed? Cosign signing optional; the cluster pulls a public image
