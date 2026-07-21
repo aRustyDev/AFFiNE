@@ -11,8 +11,8 @@ import { z } from 'zod';
 import {
   ExponentialBackoffScheduler,
   InvalidAuthState,
+  InvalidOauthCallbackCode,
   InvalidOauthResponse,
-  safeFetch,
   URLHelper,
 } from '../../../base';
 import { OAuthOIDCProviderConfig, OAuthProviderName } from '../config';
@@ -77,7 +77,30 @@ export class OIDCProvider extends OAuthProvider implements OnModuleDestroy {
   override provider = OAuthProviderName.OIDC;
   #endpoints: OIDCConfiguration | null = null;
   #jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
-  private readonly oidcFetch = safeFetch;
+  // Woven fork (infra-bt6g.8.1): OIDC targets an internal, org-CA-signed issuer
+  // (Zitadel id.auth.woven) reachable only via the idp-egress proxy on a private
+  // ClusterIP. The SSRF-guarded native safeFetch rejects it twice over — `blocked_ip`
+  // on the private target, and a TLS failure because its rustls client trusts only
+  // webpki (public) roots and ignores NODE_EXTRA_CA_CERTS. Node fetch honors
+  // NODE_EXTRA_CA_CERTS (org-CA trust) and has no SSRF guard. The OIDC issuer is
+  // operator/server config (not user-controllable), so dropping the SSRF check on
+  // these OIDC-only fetches is an accepted self-host tradeoff.
+  private readonly oidcFetch = async (
+    url: string | URL,
+    init: RequestInit = {},
+    options: { timeoutMs?: number } = {}
+  ): Promise<Response> => {
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(),
+      options.timeoutMs ?? OIDC_FETCH_OPTIONS.timeoutMs
+    );
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   readonly #retryScheduler = new ExponentialBackoffScheduler({
     baseDelayMs: OIDC_DISCOVERY_INITIAL_RETRY_DELAY,
     maxDelayMs: OIDC_DISCOVERY_MAX_RETRY_DELAY,
@@ -90,6 +113,44 @@ export class OIDCProvider extends OAuthProvider implements OnModuleDestroy {
 
   onModuleDestroy() {
     this.#retryScheduler.clear();
+  }
+
+  // Override the base OAuthProvider fetch (native SSRF-guarded safeFetch) so OIDC
+  // userinfo + token-exchange calls go through oidcFetch (Node fetch) as well — they
+  // hit the same internal, org-CA-signed issuer as discovery/JWKS. Scoped to OIDC;
+  // Google/GitHub/Apple keep the native safeFetch. See the oidcFetch rationale above.
+  protected override async fetchJson<T>(
+    url: string,
+    init?: RequestInit,
+    options?: { treatServerErrorAsInvalid?: boolean }
+  ): Promise<T> {
+    const response = await this.oidcFetch(
+      url,
+      { ...init, headers: { ...init?.headers, Accept: 'application/json' } },
+      OIDC_FETCH_OPTIONS
+    );
+
+    const body = await response.text();
+    if (!response.ok) {
+      if (response.status < 500 || options?.treatServerErrorAsInvalid) {
+        throw new InvalidOauthCallbackCode({ status: response.status, body });
+      }
+      throw new Error(
+        `Server responded with non-success status ${response.status}, body: ${body}`
+      );
+    }
+
+    if (!body) {
+      return {} as T;
+    }
+
+    try {
+      return JSON.parse(body) as T;
+    } catch {
+      throw new InvalidOauthResponse({
+        reason: `Unable to parse JSON response from ${url}`,
+      });
+    }
   }
 
   override get requiresPkce() {
