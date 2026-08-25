@@ -2,9 +2,10 @@ import { notify } from '@affine/component';
 import { getStoreManager } from '@affine/core/blocksuite/manager/store';
 import { AffineContext } from '@affine/core/components/context';
 import { AppFallback } from '@affine/core/mobile/components/app-fallback';
+import { MobileModalConfigProvider } from '@affine/core/mobile/components/mobile-modal-config-provider';
 import { configureMobileModules } from '@affine/core/mobile/modules';
+import { MobileBackCoordinator } from '@affine/core/mobile/modules/back-coordinator';
 import { HapticProvider } from '@affine/core/mobile/modules/haptics';
-import { NavigationGestureProvider } from '@affine/core/mobile/modules/navigation-gesture';
 import { VirtualKeyboardProvider } from '@affine/core/mobile/modules/virtual-keyboard';
 import { router } from '@affine/core/mobile/router';
 import { configureCommonModules } from '@affine/core/modules';
@@ -46,6 +47,7 @@ import {
   requestApplySubscriptionMutation,
 } from '@affine/graphql';
 import { I18n } from '@affine/i18n';
+import { serveAuthRequests } from '@affine/mobile-shared/auth/channel';
 import { StoreManagerClient } from '@affine/nbstore/worker/client';
 import { setTelemetryTransport } from '@affine/track';
 import { Container } from '@blocksuite/affine/global/di';
@@ -54,12 +56,20 @@ import {
   MarkdownAdapter,
   titleMiddleware,
 } from '@blocksuite/affine/shared/adapters';
+import { registerNativeImageFilesPicker } from '@blocksuite/affine/shared/utils';
 import { MarkdownTransformer } from '@blocksuite/affine/widgets/linked-doc';
 import { App as CapacitorApp } from '@capacitor/app';
 import { Browser } from '@capacitor/browser';
+import { Capacitor } from '@capacitor/core';
 import { Haptics } from '@capacitor/haptics';
 import { Keyboard, KeyboardStyle } from '@capacitor/keyboard';
-import { Framework, FrameworkRoot, getCurrentStore } from '@toeverything/infra';
+import {
+  Framework,
+  FrameworkRoot,
+  getCurrentStore,
+  useLiveData,
+  useService,
+} from '@toeverything/infra';
 import { OpClient } from '@toeverything/infra/op';
 import { AsyncCall } from 'async-call-rpc';
 import { AppTrackingTransparency } from 'capacitor-plugin-app-tracking-transparency';
@@ -68,18 +78,19 @@ import { Suspense, useEffect } from 'react';
 import { RouterProvider } from 'react-router-dom';
 
 import { BlocksuiteMenuConfigProvider } from './bs-menu-config';
-import { ModalConfigProvider } from './modal-config';
+import { AffineTheme } from './plugins/affine-theme';
 import { Auth } from './plugins/auth';
 import { Hashcash } from './plugins/hashcash';
+import { ImagePicker } from './plugins/image-picker';
+import { NavigationGesture } from './plugins/navigation-gesture';
 import { NbStoreNativeDBApis } from './plugins/nbstore';
 import { PayWall } from './plugins/paywall';
 import { Preview } from './plugins/preview';
 import {
-  deleteEndpointToken,
-  readEndpointToken,
-  writeEndpointToken,
+  authRequestProvider,
+  clearEndpointSession,
+  getValidAccessToken,
 } from './proxy';
-import { enableNavigationGesture$ } from './web-navigation-control';
 
 const storeManagerClient = createStoreManagerClient();
 setTelemetryTransport(storeManagerClient.telemetry);
@@ -165,11 +176,6 @@ framework.impl(VirtualKeyboardProvider, {
     };
   },
 });
-framework.impl(NavigationGestureProvider, {
-  isEnabled: () => enableNavigationGesture$.value,
-  enable: () => enableNavigationGesture$.next(true),
-  disable: () => enableNavigationGesture$.next(false),
-});
 framework.impl(HapticProvider, {
   impact: options => Haptics.impact(options as any),
   vibrate: options => Haptics.vibrate(options as any),
@@ -183,45 +189,43 @@ framework.scope(ServerScope).override(AuthProvider, resolver => {
   const endpoint = serverService.server.baseUrl;
   return {
     async signInMagicLink(email, linkToken, clientNonce) {
-      const { token } = await Auth.signInMagicLink({
+      await Auth.signInMagicLink({
         endpoint,
         email,
         token: linkToken,
         clientNonce,
       });
-      await writeEndpointToken(endpoint, token);
     },
     async signInOauth(code, state, _provider, clientNonce) {
-      const { token } = await Auth.signInOauth({
+      await Auth.signInOauth({
         endpoint,
         code,
         state,
         clientNonce,
       });
-      await writeEndpointToken(endpoint, token);
       return {};
     },
     async signInPassword(credential) {
-      const { token } = await Auth.signInPassword({
+      await Auth.signInPassword({
         endpoint,
         ...credential,
       });
-      await writeEndpointToken(endpoint, token);
     },
     async signInOpenAppSignInCode(code) {
-      const { token } = await Auth.signInOpenApp({
+      await Auth.signInOpenApp({
         endpoint,
         code,
       });
-      await writeEndpointToken(endpoint, token);
     },
     async signOut() {
-      const token = await readEndpointToken(endpoint);
       try {
-        await Auth.signOut({ endpoint, token });
+        await Auth.signOut({ endpoint });
       } finally {
-        await deleteEndpointToken(endpoint);
+        await clearEndpointSession(endpoint);
       }
+    },
+    async clearSession() {
+      await clearEndpointSession(endpoint);
     },
   };
 });
@@ -236,6 +240,39 @@ const frameworkProvider = framework.provider();
 registerNativePreviewHandlers({
   renderMermaidSvg: request => Preview.renderMermaidSvg(request),
   renderTypstSvg: request => Preview.renderTypstSvg(request),
+});
+registerNativeImageFilesPicker(async () => {
+  const result = await ImagePicker.pickImages({ multiple: true });
+  if (result.canceled || result.files.length === 0) {
+    return [];
+  }
+
+  const settled = await Promise.allSettled(
+    result.files.map(async file => {
+      const filePath = file.path.startsWith('file://')
+        ? file.path
+        : `file://${file.path}`;
+      const response = await fetch(Capacitor.convertFileSrc(filePath));
+      if (!response.ok) {
+        throw new Error(
+          `Failed to read image picker file: ${file.name} (status ${response.status})`
+        );
+      }
+
+      const blob = await response.blob();
+      return new File([blob], file.name, {
+        type: file.mimeType || blob.type || 'image/*',
+        lastModified: file.lastModified,
+      });
+    })
+  );
+
+  return settled
+    .filter(
+      (settledResult): settledResult is PromiseFulfilledResult<File> =>
+        settledResult.status === 'fulfilled'
+    )
+    .map(settledResult => settledResult.value);
 });
 
 // ------ some apis for native ------
@@ -252,6 +289,9 @@ registerNativePreviewHandlers({
 (window as any).getCurrentI18nLocale = () => {
   return I18n.language;
 };
+(window as any).getCurrentThemeMode = () => {
+  return 'system';
+};
 (window as any).getAiButtonFeatureFlag = () => {
   const featureFlagService = frameworkProvider.get(FeatureFlagService);
   return featureFlagService.flags.enable_mobile_ai_button.value;
@@ -263,6 +303,39 @@ registerNativePreviewHandlers({
 (window as any).getCurrentDocId = () => {
   const globalContextService = frameworkProvider.get(GlobalContextService);
   return globalContextService.globalContext.docId.get();
+};
+(window as any).waitForSelectedSources = async (documentIds: string[]) => {
+  const globalContextService = frameworkProvider.get(GlobalContextService);
+  const currentWorkspaceId =
+    globalContextService.globalContext.workspaceId.get();
+  const workspacesService = frameworkProvider.get(WorkspacesService);
+  const workspaceRef = currentWorkspaceId
+    ? workspacesService.openByWorkspaceId(currentWorkspaceId)
+    : null;
+  if (!workspaceRef) {
+    throw new Error('Current workspace is unavailable');
+  }
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const { workspace } = workspaceRef;
+    await Promise.race([
+      Promise.all(
+        [workspace.id, 'db$docProperties', ...new Set(documentIds)].map(docId =>
+          workspace.engine.doc.waitForSynced(docId)
+        )
+      ),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('Selected source synchronization timed out')),
+          15000
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    workspaceRef.dispose();
+  }
 };
 (window as any).getCurrentUserIdentifier = () => {
   const globalContextService = frameworkProvider.get(GlobalContextService);
@@ -423,6 +496,13 @@ window.addEventListener('focus', () => {
   frameworkProvider.get(LifecycleService).applicationFocus();
 });
 frameworkProvider.get(LifecycleService).applicationStart();
+CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+  if (!isActive) return;
+  const servers = frameworkProvider.get(ServersService).servers$.value;
+  Promise.allSettled(
+    servers.map(server => getValidAccessToken(server.baseUrl))
+  ).catch(console.error);
+}).catch(console.error);
 
 const getErrorMessage = (error: unknown, fallback: string) => {
   if (typeof error === 'string' && error) {
@@ -522,6 +602,52 @@ const KeyboardThemeProvider = () => {
     });
   }, [resolvedTheme]);
 
+  useEffect(() => {
+    const themeMode = resolvedTheme === 'dark' ? 'dark' : 'light';
+    (window as any).getCurrentThemeMode = () => {
+      return themeMode;
+    };
+    AffineTheme.onThemeChanged({
+      themeMode,
+    }).catch(e => {
+      console.error(`Failed to sync app theme: ${e}`);
+    });
+  }, [resolvedTheme]);
+
+  return null;
+};
+
+const IOSBackAdapter = () => {
+  const coordinator = useService(MobileBackCoordinator);
+  const enabled = useLiveData(coordinator.canInteractivePop$);
+
+  useEffect(() => {
+    (enabled ? NavigationGesture.enable() : NavigationGesture.disable()).catch(
+      console.error
+    );
+  }, [enabled]);
+
+  useEffect(() => {
+    let disposed = false;
+    let remove = () => {};
+    NavigationGesture.addListener('gesture', event => {
+      coordinator.handleInteractivePhase(event.phase);
+    })
+      .then(handle => {
+        if (disposed) handle.remove().catch(console.error);
+        else
+          remove = () => {
+            handle.remove().catch(console.error);
+          };
+      })
+      .catch(console.error);
+    return () => {
+      disposed = true;
+      remove();
+      NavigationGesture.disable().catch(console.error);
+    };
+  }, [coordinator]);
+
   return null;
 };
 
@@ -530,9 +656,10 @@ export function App() {
     <Suspense>
       <FrameworkRoot framework={frameworkProvider}>
         <I18nProvider>
-          <AffineContext store={getCurrentStore()}>
-            <KeyboardThemeProvider />
-            <ModalConfigProvider>
+          <MobileModalConfigProvider>
+            <AffineContext store={getCurrentStore()}>
+              <KeyboardThemeProvider />
+              <IOSBackAdapter />
               <BlocksuiteMenuConfigProvider>
                 <RouterProvider
                   fallbackElement={<AppFallback />}
@@ -540,8 +667,8 @@ export function App() {
                   future={future}
                 />
               </BlocksuiteMenuConfigProvider>
-            </ModalConfigProvider>
-          </AffineContext>
+            </AffineContext>
+          </MobileModalConfigProvider>
         </I18nProvider>
       </FrameworkRoot>
     </Suspense>
@@ -573,16 +700,9 @@ function createStoreManagerClient() {
 
   const { port1: authTokenChannelServer, port2: authTokenChannelClient } =
     new MessageChannel();
-  authTokenChannelServer.addEventListener('message', event => {
-    const { id, endpoint } = event.data as { id?: string; endpoint?: string };
-    if (!id || !endpoint) return;
-    readEndpointToken(endpoint)
-      .then(token => authTokenChannelServer.postMessage({ id, token }))
-      .catch(() => authTokenChannelServer.postMessage({ id, token: null }));
-  });
-  authTokenChannelServer.start();
+  serveAuthRequests(authTokenChannelServer, authRequestProvider);
   worker.postMessage(
-    { type: 'native-auth-token-channel', port: authTokenChannelClient },
+    { type: 'auth-access-token-channel', port: authTokenChannelClient },
     [authTokenChannelClient]
   );
   return new StoreManagerClient(new OpClient(worker));

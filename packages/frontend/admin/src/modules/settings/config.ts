@@ -3,6 +3,7 @@ import type { ComponentType } from 'react';
 
 import CONFIG_DESCRIPTORS from '../../config.json';
 import type { ConfigInputProps } from './config-input-row';
+import { AuthSigningKeys } from './operations/auth-signing-keys';
 import { SendTestEmail } from './operations/send-test-email';
 export type ConfigType = 'String' | 'Number' | 'Boolean' | 'JSON' | 'Enum';
 
@@ -75,6 +76,7 @@ export const KNOWN_CONFIG_GROUPS = [
         desc: 'Maximum length requirement of password',
       },
     ],
+    operations: [AuthSigningKeys],
   } as ConfigGroup<'auth'>,
   {
     name: 'Notification',
@@ -145,34 +147,19 @@ export const KNOWN_CONFIG_GROUPS = [
     fields: ['providers.google', 'providers.github', 'providers.oidc'],
   } as ConfigGroup<'oauth'>,
   {
-    name: 'AI',
+    name: 'AI BYOK',
     module: 'copilot',
     fields: [
-      'enabled',
-      'providers.openai',
-      'providers.gemini',
-      'providers.anthropic',
-      'providers.fal',
-      'unsplash',
-      'exa',
       {
-        key: 'storage',
-        desc: 'The storage provider for copilot blobs',
-        sub: 'provider',
-        type: 'Enum',
-        options: ['fs', 'aws-s3', 'cloudflare-r2'],
+        key: 'enabled',
+        desc: 'Enable AI features. Workspace owners configure provider keys in Workspace Settings → Integrations → AI BYOK.',
       },
+      'byok.enabled',
+      'byok.allowedProviders',
+      'byok.allowCustomEndpoint',
       {
-        key: 'storage',
-        sub: 'bucket',
-        type: 'String',
-        desc: 'The bucket name for copilot blobs storage',
-      },
-      {
-        key: 'storage',
-        sub: 'config',
-        type: 'JSON',
-        desc: 'The S3 compatible config for the storage provider (endpoint/region/credentials).',
+        key: 'byok.allowPrivateEndpoint',
+        desc: 'Allow workspace owners and admins to connect BYOK providers on private network endpoints. Only enable this for trusted workspaces.',
       },
     ],
   } as ConfigGroup<'copilot'>,

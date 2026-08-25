@@ -13,6 +13,8 @@ import {
   InvalidAuthState,
   InvalidOauthCallbackCode,
   InvalidOauthResponse,
+  type SafeFetchOptions,
+  SsrfBlockedError,
   URLHelper,
 } from '../../../base';
 import { OAuthOIDCProviderConfig, OAuthProviderName } from '../config';
@@ -65,26 +67,42 @@ type OIDCConfiguration = z.infer<typeof OIDCConfigurationSchema>;
 
 const OIDC_DISCOVERY_INITIAL_RETRY_DELAY = 1000;
 const OIDC_DISCOVERY_MAX_RETRY_DELAY = 60_000;
-const OIDC_FETCH_OPTIONS = {
-  timeoutMs: 10_000,
-  maxRedirects: 3,
-  maxBytes: 1024 * 1024,
-  allowedHeaders: ['accept'],
-};
+
+// Woven fork: upstream d24c17f300 (#15271) DELETED the module-level OIDC_FETCH_OPTIONS when it
+// moved those knobs into OAuthProvider.fetchOptions(). Only the timeout survives here, and only
+// as a fallback: every oidcFetch call site now passes this.fetchOptions(url), exactly like the
+// base class does. The other former fields (maxRedirects/maxBytes/allowedHeaders) are
+// deliberately NOT reinstated — oidcFetch is Node fetch and honors none of them, so carrying
+// them would only imply a limit that is not enforced.
+const OIDC_FETCH_TIMEOUT_MS = 10_000;
 
 @Injectable()
 export class OIDCProvider extends OAuthProvider implements OnModuleDestroy {
   override provider = OAuthProviderName.OIDC;
   #endpoints: OIDCConfiguration | null = null;
   #jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
-  // Woven fork (infra-bt6g.8.1): OIDC targets an internal, org-CA-signed issuer
-  // (Zitadel id.auth.woven) reachable only via the idp-egress proxy on a private
-  // ClusterIP. The SSRF-guarded native safeFetch rejects it twice over — `blocked_ip`
-  // on the private target, and a TLS failure because its rustls client trusts only
-  // webpki (public) roots and ignores NODE_EXTRA_CA_CERTS. Node fetch honors
-  // NODE_EXTRA_CA_CERTS (org-CA trust) and has no SSRF guard. The OIDC issuer is
-  // operator/server config (not user-controllable), so dropping the SSRF check on
-  // these OIDC-only fetches is an accepted self-host tradeoff.
+  // Woven fork (infra-bt6g.8.1, re-justified at infra-d4aj): OIDC targets an internal,
+  // org-CA-signed issuer (Zitadel id.auth.woven). The native safeFetch cannot reach it.
+  //
+  // ⚠️ ONE of the two original reasons is now UPSTREAM-SOLVED — do not cite it as
+  // justification any more. `blocked_ip` on a private target is handled by
+  // OAuthOIDCProviderConfig.allowPrivateNetwork + the fetchOptions() override below
+  // (upstream d24c17f300). That is NOT why this override still exists.
+  //
+  // What still forces Node fetch is TLS TRUST: safeFetch is the native Rust path
+  // (base/utils/ssrf.ts -> native/src/safe_fetch.rs -> the `safefetch` crate), built on
+  // rustls with NO native-certs feature, so it trusts webpki (public) roots only and
+  // IGNORES NODE_EXTRA_CA_CERTS. MEASURED on ghcr.io/toeverything/affine:stable
+  // (infra-d4aj): native safeFetch succeeds against public TLS and fails against
+  // id.auth.woven even with NODE_EXTRA_CA_CERTS set and allowPrivateTargetOrigin: true,
+  // while Node fetch on the same host in the same process returns 200 once the org CA is
+  // supplied. The cert chain is the only variable.
+  //
+  // Tradeoff, unchanged: Node fetch has no SSRF guard. The OIDC issuer is operator/server
+  // config (not user-controllable), so dropping that check on these OIDC-only fetches is an
+  // accepted self-host risk. fetchOptions() is still threaded through every call site so the
+  // upstream knobs keep applying the moment this returns to safeFetch — note that on the Node
+  // fetch path only timeoutMs has any effect; allowPrivateTargetOrigin is inert here.
   private readonly oidcFetch = async (
     url: string | URL,
     init: RequestInit = {},
@@ -93,7 +111,7 @@ export class OIDCProvider extends OAuthProvider implements OnModuleDestroy {
     const controller = new AbortController();
     const timer = setTimeout(
       () => controller.abort(),
-      options.timeoutMs ?? OIDC_FETCH_OPTIONS.timeoutMs
+      options.timeoutMs ?? OIDC_FETCH_TIMEOUT_MS
     );
     try {
       return await fetch(url, { ...init, signal: controller.signal });
@@ -127,7 +145,7 @@ export class OIDCProvider extends OAuthProvider implements OnModuleDestroy {
     const response = await this.oidcFetch(
       url,
       { ...init, headers: { ...init?.headers, Accept: 'application/json' } },
-      OIDC_FETCH_OPTIONS
+      this.fetchOptions(url)
     );
 
     const body = await response.text();
@@ -155,6 +173,24 @@ export class OIDCProvider extends OAuthProvider implements OnModuleDestroy {
 
   override get requiresPkce() {
     return true;
+  }
+
+  protected override fetchOptions(rawUrl: string | URL): SafeFetchOptions {
+    const options = super.fetchOptions(rawUrl);
+    const config = this.config as OAuthOIDCProviderConfig;
+    if (!config.allowPrivateNetwork) {
+      return options;
+    }
+    try {
+      const issuer = new URL(config.issuer);
+      const target = new URL(rawUrl);
+      if (target.origin === issuer.origin) {
+        return { ...options, allowPrivateTargetOrigin: true };
+      }
+    } catch {
+      return options;
+    }
+    return options;
   }
 
   private get endpoints() {
@@ -206,10 +242,11 @@ export class OIDCProvider extends OAuthProvider implements OnModuleDestroy {
     }
 
     try {
+      const discoveryUrl = `${this.normalizeIssuer(config.issuer)}/.well-known/openid-configuration`;
       const res = await this.oidcFetch(
-        `${config.issuer}/.well-known/openid-configuration`,
+        discoveryUrl,
         { method: 'GET', headers: { Accept: 'application/json' } },
-        OIDC_FETCH_OPTIONS
+        this.fetchOptions(discoveryUrl)
       );
 
       if (generation !== this.#validationGeneration) {
@@ -237,7 +274,7 @@ export class OIDCProvider extends OAuthProvider implements OnModuleDestroy {
       this.#endpoints = configuration;
       this.#jwks = createRemoteJWKSet(new URL(configuration.jwks_uri), {
         [customFetch]: (url, init) =>
-          this.oidcFetch(url, init, OIDC_FETCH_OPTIONS),
+          this.oidcFetch(url, init, this.fetchOptions(url)),
       });
       this.#retryScheduler.reset();
       super.setup();
@@ -245,7 +282,14 @@ export class OIDCProvider extends OAuthProvider implements OnModuleDestroy {
       if (generation !== this.#validationGeneration) {
         return;
       }
-      this.logger.error('Failed to validate OIDC configuration', e);
+      const reason = e instanceof SsrfBlockedError ? e.data?.reason : undefined;
+      const message =
+        reason === 'blocked_ip' && !config.allowPrivateNetwork
+          ? 'Failed to validate OIDC configuration: issuer resolves to a private network address; set oauth.providers.oidc.allowPrivateNetwork to true to trust this origin'
+          : reason
+            ? `Failed to validate OIDC configuration: ${reason}`
+            : 'Failed to validate OIDC configuration';
+      this.logger.error(message, e);
       this.onValidationFailure(generation);
     }
   }

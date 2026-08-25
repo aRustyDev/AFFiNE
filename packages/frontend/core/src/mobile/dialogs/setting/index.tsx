@@ -4,11 +4,12 @@ import type {
   WORKSPACE_DIALOG_SCHEMA,
 } from '@affine/core/modules/dialogs';
 import { useI18n } from '@affine/i18n';
-import { useService } from '@toeverything/infra';
+import { useLiveData, useService } from '@toeverything/infra';
 import { useEffect } from 'react';
 
 import { AboutGroup } from './about';
 import { AppearanceGroup } from './appearance';
+import { DevicesGroup } from './devices';
 import { ExperimentalFeatureSetting } from './experimental';
 import { OthersGroup } from './others';
 import * as styles from './style.css';
@@ -19,6 +20,7 @@ import { UserUsage } from './user-usage';
 
 const MobileSetting = () => {
   const session = useService(AuthService).session;
+  const status = useLiveData(session.status$);
   useEffect(() => session.revalidate(), [session]);
 
   return (
@@ -26,6 +28,7 @@ const MobileSetting = () => {
       <UserProfile />
       <UserSubscription />
       <UserUsage />
+      {status === 'authenticated' ? <DevicesGroup /> : null}
       <AppearanceGroup />
       <AboutGroup />
       <ExperimentalFeatureSetting />

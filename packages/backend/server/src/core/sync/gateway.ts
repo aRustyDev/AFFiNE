@@ -24,7 +24,6 @@ import {
   checkCanaryDateClientVersion,
   DocNotFound,
   DocUpdateBlocked,
-  EventBus,
   GatewayErrorWrapper,
   metrics,
   NotInSpace,
@@ -32,6 +31,7 @@ import {
   SpaceAccessDenied,
 } from '../../base';
 import { Models } from '../../models';
+import { authorizeUserdataDocSubject } from '../../native';
 import { CurrentUser } from '../auth';
 import {
   DocReader,
@@ -85,14 +85,16 @@ type SyncProtocolRoomType = Extract<RoomType, 'sync-025' | 'sync-026'>;
 const SOCKET_PRESENCE_USER_ID_KEY = 'affinePresenceUserId';
 
 function normalizeWsClientVersion(clientVersion: string): string | null {
-  if (env.namespaces.canary) {
-    const canaryCheck = checkCanaryDateClientVersion(clientVersion);
-    if (canaryCheck.matched) {
-      return canaryCheck.allowed ? canaryCheck.normalized : null;
-    }
+  const canaryCheck = checkCanaryDateClientVersion(clientVersion);
+  if (!canaryCheck.matched) {
+    return clientVersion;
   }
 
-  return clientVersion;
+  if (!env.namespaces.canary) {
+    return null;
+  }
+
+  return canaryCheck.allowed ? canaryCheck.normalized : null;
 }
 
 function isSupportedWsClientVersion(clientVersion: string): boolean {
@@ -224,7 +226,6 @@ export class SpaceSyncGateway
 
   constructor(
     private readonly ac: PermissionAccess,
-    private readonly event: EventBus,
     private readonly workspace: PgWorkspaceDocStorageAdapter,
     private readonly userspace: PgUserspaceDocStorageAdapter,
     private readonly docReader: DocReader,
@@ -330,6 +331,20 @@ export class SpaceSyncGateway
     await this.ac.user(userId).doc(spaceId, docId).assert(action);
   }
 
+  private assertUserdataSubject(
+    spaceType: SpaceType,
+    userId: string,
+    workspaceId: string,
+    docId: string
+  ) {
+    if (
+      spaceType === SpaceType.Workspace &&
+      !authorizeUserdataDocSubject(userId, workspaceId, docId)
+    ) {
+      throw new SpaceAccessDenied({ spaceId: workspaceId });
+    }
+  }
+
   handleConnection(client: Socket) {
     this.connectionCount++;
     this.logger.debug(`New connection, total: ${this.connectionCount}`);
@@ -351,7 +366,7 @@ export class SpaceSyncGateway
 
   private attachPresenceUserId(client: Socket): string | null {
     const request = client.request as Request;
-    const userId = request.session?.user.id ?? request.token?.user.id;
+    const userId = request.session?.user.id;
     if (typeof userId !== 'string' || !userId) {
       this.logger.warn(
         `Unable to resolve authenticated user id for socket ${client.id}`
@@ -597,10 +612,6 @@ export class SpaceSyncGateway
       return { data: { clientId: client.id, success: false } };
     }
 
-    if (spaceType === SpaceType.Workspace) {
-      this.event.emit('workspace.embedding', { workspaceId: spaceId });
-    }
-
     const adapter = this.selectAdapter(client, spaceType);
     await adapter.join(user.id, spaceId);
 
@@ -642,6 +653,7 @@ export class SpaceSyncGateway
     const id = new DocID(docId, spaceId);
     const adapter = this.selectAdapter(client, spaceType);
     adapter.assertIn(spaceId);
+    this.assertUserdataSubject(spaceType, user.id, spaceId, id.guid);
     await this.assertDocActionAllowed(
       spaceType,
       user.id,
@@ -676,6 +688,7 @@ export class SpaceSyncGateway
     @MessageBody() { spaceType, spaceId, docId }: DeleteDocMessage
   ): Promise<EventResponse<{ success: true }>> {
     const adapter = this.selectAdapter(client, spaceType);
+    this.assertUserdataSubject(spaceType, user.id, spaceId, docId);
     await this.assertDocActionAllowed(
       spaceType,
       user.id,
@@ -700,7 +713,8 @@ export class SpaceSyncGateway
     const { spaceType, spaceId, docId, update } = message;
     const adapter = this.selectAdapter(client, spaceType);
 
-    // Quota recovery mode is intentionally not applied to sync in this phase.
+    // Quota recovery mode is intentionally not applied to sync.
+    this.assertUserdataSubject(spaceType, user.id, spaceId, docId);
     await this.assertDocActionAllowed(
       spaceType,
       user.id,

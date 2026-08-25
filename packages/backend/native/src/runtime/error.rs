@@ -1,6 +1,6 @@
 use napi::{Error, Status};
 
-use super::storage_runtime::object_storage::error::ObjectStorageError;
+use super::object_storage::error::ObjectStorageError;
 
 pub(crate) type RuntimeResult<T> = std::result::Result<T, RuntimeError>;
 
@@ -96,6 +96,16 @@ impl RuntimeError {
       }
       _ => false,
     }
+  }
+
+  pub(crate) fn is_serialization_failure(&self) -> bool {
+    matches!(
+      self,
+      Self::Database {
+        source: sqlx::Error::Database(source),
+        ..
+      } if source.code().as_deref() == Some("40001")
+    )
   }
 }
 

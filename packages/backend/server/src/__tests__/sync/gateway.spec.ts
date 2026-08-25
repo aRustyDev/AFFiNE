@@ -148,25 +148,36 @@ function expectNoEvent(
 }
 
 async function login(app: TestingApp) {
-  const user = await app.createUser();
-  const cookieRes = await app
-    .POST('/api/auth/sign-in')
-    .send({ email: user.email, password: user.password })
-    .expect(200);
+  const { user, cookieHeader } = await loginWithCookie(app);
   const nativeRes = await app
     .POST('/api/auth/sign-in')
     .set('x-affine-client-kind', 'native')
     .send({ email: user.email, password: user.password })
     .expect(200);
   const tokenRes = await app
-    .POST('/api/auth/native/exchange')
+    .POST('/api/auth/session/exchange')
     .set('x-affine-client-kind', 'native')
-    .send({ code: nativeRes.body.exchangeCode })
+    .send({
+      code: nativeRes.body.exchangeCode,
+      installationId: '00000000-0000-4000-8000-000000000005',
+      platform: 'electron',
+    })
     .expect(201);
+
+  return { user, cookieHeader, token: tokenRes.body.accessToken as string };
+}
+
+async function loginWithCookie(app: TestingApp) {
+  const user = await app.createUser();
+  const cookieRes = await app
+    .POST('/api/auth/sign-in')
+    .set('x-affine-version', '0.26.7')
+    .send({ email: user.email, password: user.password })
+    .expect(200);
 
   const cookies = cookieRes.get('Set-Cookie') ?? [];
   const cookieHeader = cookies.map(c => c.split(';')[0]).join('; ');
-  return { user, cookieHeader, token: tokenRes.body.token as string };
+  return { user, cookieHeader };
 }
 
 function createYjsUpdateBase64() {
@@ -366,7 +377,7 @@ test('clientVersion=0.25.0 should only receive space:broadcast-doc-update', asyn
 });
 
 test('clientVersion>=0.26.0 should only receive space:broadcast-doc-updates', async t => {
-  const { user, cookieHeader } = await login(app);
+  const { user, cookieHeader } = await loginWithCookie(app);
   const spaceId = user.id;
   const update = createYjsUpdateBase64();
 
@@ -381,7 +392,7 @@ test('clientVersion>=0.26.0 should only receive space:broadcast-doc-updates', as
       await emitWithAck<{ clientId: string; success: boolean }>(
         receiver,
         'space:join',
-        { spaceType: 'userspace', spaceId, clientVersion: '0.26.0' }
+        { spaceType: 'userspace', spaceId, clientVersion: '0.26.7' }
       )
     );
     t.true(receiverJoin.success);
@@ -572,6 +583,43 @@ test('old canary date clientVersion should be rejected and disconnected in canar
   }
 });
 
+test('canary date clientVersion should be rejected outside canary namespace', async t => {
+  const prevNamespace = env.NAMESPACE;
+  // @ts-expect-error test
+  env.NAMESPACE = 'production';
+
+  try {
+    const { user, cookieHeader } = await login(app);
+    const spaceId = user.id;
+
+    const socket = createClient(url, cookieHeader);
+    try {
+      await waitForConnect(socket);
+
+      const res = unwrapResponse(
+        t,
+        await emitWithAck<{ clientId: string; success: boolean }>(
+          socket,
+          'space:join',
+          {
+            spaceType: 'userspace',
+            spaceId,
+            clientVersion: makeCanaryDateVersion(new Date(), '15'),
+          }
+        )
+      );
+      t.false(res.success);
+
+      await waitForDisconnect(socket);
+    } finally {
+      socket.disconnect();
+    }
+  } finally {
+    // @ts-expect-error test
+    env.NAMESPACE = prevNamespace;
+  }
+});
+
 test('space:join-awareness should reject clientVersion<0.25.0', async t => {
   const { user, cookieHeader } = await login(app);
   const spaceId = user.id;
@@ -623,7 +671,7 @@ test('active users metric should dedupe multiple sockets for one user', async t 
 test('workspace sync delete-doc should enforce doc permissions', async t => {
   const db = app.get(PrismaClient);
   const models = app.get(Models);
-  const { user: owner } = await login(app);
+  const { user: owner, cookieHeader: ownerCookieHeader } = await login(app);
   const { user: collaborator, cookieHeader } = await login(app);
   const workspace = await models.workspace.create(owner.id);
   const docId = 'private-doc';
@@ -644,9 +692,10 @@ test('workspace sync delete-doc should enforce doc permissions', async t => {
   });
 
   const socket = createClient(url, cookieHeader);
+  const ownerSocket = createClient(url, ownerCookieHeader);
 
   try {
-    await waitForConnect(socket);
+    await Promise.all([waitForConnect(socket), waitForConnect(ownerSocket)]);
 
     const join = unwrapResponse(
       t,
@@ -671,8 +720,47 @@ test('workspace sync delete-doc should enforce doc permissions', async t => {
       })
     );
     t.true(error.message.includes('Doc.Delete'));
+
+    const userdataError = getErrorResponse(
+      t,
+      await emitWithAck(socket, 'space:delete-doc', {
+        spaceType: 'workspace',
+        spaceId: workspace.id,
+        docId: `userdata$${owner.id}$${workspace.id}$docIntegrationRef`,
+      })
+    );
+    t.is(userdataError.name, 'SPACE_ACCESS_DENIED');
+
+    const ownerJoin = unwrapResponse(
+      t,
+      await emitWithAck<{ clientId: string; success: boolean }>(
+        ownerSocket,
+        'space:join',
+        {
+          spaceType: 'workspace',
+          spaceId: workspace.id,
+          clientVersion: '0.26.0',
+        }
+      )
+    );
+    t.true(ownerJoin.success);
+    unwrapResponse(
+      t,
+      await emitWithAck(ownerSocket, 'space:delete-doc', {
+        spaceType: 'workspace',
+        spaceId: workspace.id,
+        docId,
+      })
+    );
+    t.is(
+      await db.snapshot.count({
+        where: { workspaceId: workspace.id, id: docId },
+      }),
+      1
+    );
   } finally {
     socket.disconnect();
+    ownerSocket.disconnect();
   }
 });
 
@@ -727,6 +815,16 @@ test('workspace sync load-doc should enforce doc read permissions', async t => {
       })
     );
     t.true(error.message.includes('Doc.Read'));
+
+    const userdataError = getErrorResponse(
+      t,
+      await emitWithAck(socket, 'space:load-doc', {
+        spaceType: 'workspace',
+        spaceId: workspace.id,
+        docId: `userdata$${owner.id}$${workspace.id}$favorite`,
+      })
+    );
+    t.is(userdataError.name, 'SPACE_ACCESS_DENIED');
   } finally {
     socket.disconnect();
   }
@@ -790,6 +888,17 @@ test('workspace sync push-doc-update should enforce doc update permissions', asy
       })
     );
     t.true(error.message.includes('Doc.Update'));
+
+    const userdataError = getErrorResponse(
+      t,
+      await emitWithAck(socket, 'space:push-doc-update', {
+        spaceType: 'workspace',
+        spaceId: workspace.id,
+        docId: `userdata$${owner.id}$${workspace.id}$settings`,
+        update: createYjsUpdateBase64(),
+      })
+    );
+    t.is(userdataError.name, 'SPACE_ACCESS_DENIED');
 
     const updates = await db.update.count({
       where: {
