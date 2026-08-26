@@ -2,22 +2,22 @@
 
 - **D1 — Public GHCR package.** Operator call 2026-07-13 (mirrors infra D2). Cluster
   pulls `ghcr.io/arustydev/affine` anonymously; no pull secret. Accepts public visibility
-  of fork-local patches. *Status: accepted.*
+  of fork-local patches. _Status: accepted._
 - **D2 — New fork-local workflow; do not edit upstream `build-images.yml`/`release.yml`.**
   Editing shared upstream workflows forks them and breaks weekly `canary` rebases
   (`affine-hn1`). Add `woven-publish-image.yml`, derive owner from
-  `github.repository_owner`. *Status: accepted.*
+  `github.repository_owner`. _Status: accepted._
 - **D3 — Self-host server image only.** Build web+admin+server(+server-native); skip
-  mobile/desktop. The ds-cleaner chart runs the single self-host container. *Status: accepted.*
+  mobile/desktop. The ds-cleaner chart runs the single self-host container. _Status: accepted._
 - **D4 — Build without proprietary secrets.** Omit R2/Sentry/Perfsee/Captcha (telemetry/
   source-map/anti-bot) and `AFFINE_PRO_*` (licensed native) → community/self-host image.
-  A0 spike confirms exactly what breaks with them empty. *Status: accepted, pending A0.*
+  A0 spike confirms exactly what breaks with them empty. _Status: accepted, pending A0._
 - **D5 — Tags: immutable `woven-<short-sha>` + moving `:woven`.** Cluster pins the
-  immutable ref; `:woven` for humans. OCI `image.source` → fork repo. *Status: accepted.*
+  immutable ref; `:woven` for humans. OCI `image.source` → fork repo. _Status: accepted._
 - **D6 — Arch = cluster arch (expect amd64).** Confirm via infra OQ-3; drop arm/v7 and
-  likely arm64 for CI speed; multi-arch later. *Status: accepted, pending confirmation.*
+  likely arm64 for CI speed; multi-arch later. _Status: accepted, pending confirmation._
 - **D7 — Trigger: push to `woven/main` + `workflow_dispatch`.** Not the upstream daily
-  cron (that carries the whole desktop/mobile release surface). *Status: accepted.*
+  cron (that carries the whole desktop/mobile release surface). _Status: accepted._
 
 ## Spike results — `affine-3ab.1` (A0), 2026-07-13
 

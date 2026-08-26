@@ -4,37 +4,39 @@ Deliverable of bead **affine-hn1** (upstream merge & fork-drift management). Thi
 tracked list of every **upstream-owned** file the Woven fork deliberately diverges on, with
 rationale and category. Categories come from **affine-cm9** (fork strategy):
 
-| Category | Meaning | Upstreamable? |
-|---|---|---|
-| **ADDITIVE** | New fork-owned files (`scripts/woven-*`, new plugins/modules/blocks, config flags). Rebase-safe. | Sometimes |
-| **FORK-LOCAL CORE PATCH** | Changes upstream *behavior* — member/seat limits, core auth/quota/permission. | **NEVER** |
+| Category                  | Meaning                                                                                          | Upstreamable? |
+| ------------------------- | ------------------------------------------------------------------------------------------------ | ------------- |
+| **ADDITIVE**              | New fork-owned files (`scripts/woven-*`, new plugins/modules/blocks, config flags). Rebase-safe. | Sometimes     |
+| **FORK-LOCAL CORE PATCH** | Changes upstream _behavior_ — member/seat limits, core auth/quota/permission.                    | **NEVER**     |
 
 Only **upstream-owned** files belong in the table below. Fork-owned additions are rebase-safe by
 construction and are not tracked here — the CI guard's job is to fail when an upstream-owned file
-is modified *without* a row here.
+is modified _without_ a row here.
 
 ## Diverged upstream-owned files
 
-| File | Category | Why | Delete when |
-|---|---|---|---|
-| `packages/backend/server/src/plugins/oauth/providers/oidc.ts` | **FORK-LOCAL CORE PATCH** | OIDC must reach an internal, **org-CA-signed** issuer (Zitadel `id.auth.woven`). `safeFetch` is the native Rust path (`base/utils/ssrf.ts` → `native/src/safe_fetch.rs` → the `safefetch` crate), built on rustls with **no native-certs feature**, so it trusts webpki roots only and **ignores `NODE_EXTRA_CA_CERTS`**. The patch routes OIDC discovery, JWKS and token/userinfo through Node `fetch`, which does honor it. Touches core auth behavior ⇒ never upstream. | `affine-mbv` (hardened outbound fetch service) lands with **configurable CA trust** |
+| File                                                          | Category                  | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Delete when                                                                                      |
+| ------------------------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `packages/backend/server/src/plugins/oauth/providers/oidc.ts` | **FORK-LOCAL CORE PATCH** | OIDC must reach an internal, **org-CA-signed** issuer (Zitadel `id.auth.woven`). `safeFetch` is the native Rust path (`base/utils/ssrf.ts` → `native/src/safe_fetch.rs` → the `safefetch` crate), built on rustls with **no native-certs feature**, so it trusts webpki roots only and **ignores `NODE_EXTRA_CA_CERTS`**. The patch routes OIDC discovery, JWKS and token/userinfo through Node `fetch`, which does honor it. Touches core auth behavior ⇒ never upstream.                                                                                                             | `affine-mbv` (hardened outbound fetch service) lands with **configurable CA trust**              |
+| `.github/workflows/build-test.yml`                            | **ADDITIVE**              | Adds `workflow_dispatch:` to the `on:` block, nothing else. Upstream's `push:` list covers only its own release branches, so `woven/main` has no automatic run of this workflow while `woven-publish-image.yml` _does_ fire on it — a fork merge can therefore reach GHCR untested, which is what happened to the v0.27.4 sync. One added trigger, no job or step changes, so it is low-conflict on future merges and is a plausible upstream contribution.                                                                                                                            | upstream gains its own `workflow_dispatch`, or `woven/main` is added to a `push:` list           |
+| `packages/backend/server/src/seed/index.ts`                   | **ADDITIVE**              | Adds a fork-local `WovenWorkspace` composite to the `seed` CLI (owner + members + one root-doc workspace), delegating to `__tests__/fixtures/woven-workspace.ts`, plus the matching help text. Intercepts before the `Mockers` registry lookup because the composite is not a single Mocker. **Dev/test tooling only — it changes no runtime product behavior**, which is why this is ADDITIVE and not a core patch. Was MISSED when this manifest was first written (`eac15e21bd` listed only `oidc.ts`) even though the divergence audit had identified it; added at `affine-hn1.1`. | the composite moves to a fork-owned file that upstream's `seed` CLI can discover without an edit |
 
 ### `oidc.ts` — measured justification
 
 Do **not** re-justify this patch with SSRF. Upstream `d24c17f300` (#15271) added
 `OAuthOIDCProviderConfig.allowPrivateNetwork` plus a `fetchOptions()` override granting
 `allowPrivateTargetOrigin` when the target origin matches the issuer — so `blocked_ip` is
-**upstream-solved**. TLS trust is the *only* surviving reason.
+**upstream-solved**. TLS trust is the _only_ surviving reason.
 
 Measured on `ghcr.io/toeverything/affine:stable`, calling the shipped native module directly,
 `allowPrivateTargetOrigin: true` throughout, with a public-host control:
 
-| Target | | native `safeFetch` | Node `fetch` |
-|---|---|---|---|
-| `cloudflare.com` | no CA | OK 200 | OK 200 |
-| `cloudflare.com` | with CA | OK 200 | OK 200 |
-| `id.auth.woven` | no CA | FAIL | FAIL (`unable to get local issuer certificate`) |
-| `id.auth.woven` | **with CA** | **FAIL** | **OK 200** |
+| Target           |             | native `safeFetch` | Node `fetch`                                    |
+| ---------------- | ----------- | ------------------ | ----------------------------------------------- |
+| `cloudflare.com` | no CA       | OK 200             | OK 200                                          |
+| `cloudflare.com` | with CA     | OK 200             | OK 200                                          |
+| `id.auth.woven`  | no CA       | FAIL               | FAIL (`unable to get local issuer certificate`) |
+| `id.auth.woven`  | **with CA** | **FAIL**           | **OK 200**                                      |
 
 The cert chain is the only variable, so this is a trust failure — not a network or harness
 artifact. Re-run this before deleting the patch.
@@ -52,7 +54,7 @@ artifact. Re-run this before deleting the patch.
 4. **Account for `src/schema.gql`.** It is emitted by NestJS `autoSchemaFile` **when the server
    boots** — there is no standalone codegen script, so "regenerating" it means running the full
    stack (yarn install + Rust native build + Postgres). Two acceptable outcomes: regenerate it, or
-   **prove regeneration is a no-op** — the file is byte-identical to the upstream tag *and* no
+   **prove regeneration is a no-op** — the file is byte-identical to the upstream tag _and_ no
    fork-owned file carries a GraphQL decorator (`@Resolver`/`@ObjectType`/`@InputType`/`@Field`/
    `@Query`/`@Mutation`/`@Subscription`/`@ArgsType`/`@InterfaceType`/`registerEnumType`). Record
    which one you did.

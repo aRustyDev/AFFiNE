@@ -12,6 +12,21 @@ on:
       - README.md
   pull_request:
   merge_group:
+  # Woven fork addition (affine-hn1.1). The push: list above covers only the upstream
+  # release branches, so a push to woven/main runs NOTHING — a fork merge can reach GHCR
+  # having never been tested, which is exactly what happened to the v0.27.4 sync
+  # (woven-publish-image.yml fires on that push, this workflow does not). This gives
+  # woven/main a manual trigger so the suite can be run on demand.
+  #
+  # Server Test IS reachable this way: it is gated only on `needs: build-server-native`,
+  # and that job carries no `if:`, so both run on any event.
+  #
+  # ⚠️ What DOES skip under a manual dispatch: the path-filtered optional jobs
+  # (build/test-android-app, build-ios-app, lint-rust, rust-test, copilot-api-test,
+  # copilot-e2e-test), because dorny/paths-filter has no pull_request base to diff
+  # against outside a PR. So treat a green dispatch as "server + build + typecheck
+  # passed", NOT as the full matrix a PR gives you. For a real gate, open a PR.
+  workflow_dispatch:
 
 env:
   DEBUG: napi:*

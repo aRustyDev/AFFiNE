@@ -49,7 +49,8 @@ if (name === 'WovenWorkspace') {
     memberCount:
       typeof overrides.members === 'number' ? overrides.members : undefined,
     workspaceId: typeof overrides.id === 'string' ? overrides.id : undefined,
-    ownerEmail: typeof overrides.email === 'string' ? overrides.email : undefined,
+    ownerEmail:
+      typeof overrides.email === 'string' ? overrides.email : undefined,
   });
   console.log(
     `WovenWorkspace seeded ${JSON.stringify({
