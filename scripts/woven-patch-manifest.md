@@ -18,6 +18,7 @@ is modified *without* a row here.
 | File | Category | Why | Delete when |
 |---|---|---|---|
 | `packages/backend/server/src/plugins/oauth/providers/oidc.ts` | **FORK-LOCAL CORE PATCH** | OIDC must reach an internal, **org-CA-signed** issuer (Zitadel `id.auth.woven`). `safeFetch` is the native Rust path (`base/utils/ssrf.ts` → `native/src/safe_fetch.rs` → the `safefetch` crate), built on rustls with **no native-certs feature**, so it trusts webpki roots only and **ignores `NODE_EXTRA_CA_CERTS`**. The patch routes OIDC discovery, JWKS and token/userinfo through Node `fetch`, which does honor it. Touches core auth behavior ⇒ never upstream. | `affine-mbv` (hardened outbound fetch service) lands with **configurable CA trust** |
+| `.github/workflows/build-test.yml` | **ADDITIVE** | Adds `workflow_dispatch:` to the `on:` block, nothing else. Upstream's `push:` list covers only its own release branches, so `woven/main` has no automatic run of this workflow while `woven-publish-image.yml` *does* fire on it — a fork merge can therefore reach GHCR untested, which is what happened to the v0.27.4 sync. One added trigger, no job or step changes, so it is low-conflict on future merges and is a plausible upstream contribution. | upstream gains its own `workflow_dispatch`, or `woven/main` is added to a `push:` list |
 
 ### `oidc.ts` — measured justification
 
