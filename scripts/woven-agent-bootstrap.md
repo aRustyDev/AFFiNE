@@ -30,12 +30,12 @@ with a `WOVEN FORK-LOCAL` banner so the eventual upstream-leak CI guard
 
 ## 1. Toolchain
 
-| Tool | Version | How to get it | Notes |
-|------|---------|---------------|-------|
-| Node | **22.23.x** (`.nvmrc`; engines `>=22.12 <23`) | `brew install node@22` (keg-only) | System node may be newer and is rejected by AFFiNE. Put it on PATH **for the shell only** — do not touch your rc: `export PATH="$(brew --prefix node@22)/bin:$PATH"`. The gate script does this for you. |
-| Yarn | **4.13.0** | bundled corepack: `corepack yarn …` | From `packageManager`. Set `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`. |
-| Rust | **1.96.0** | pre-existing (Homebrew) | Matches `rust-toolchain.toml`. Only needed to build native addons, not the gate. |
-| cmake | any recent | `brew install cmake` | Needed by `@affine/native` (desktop). **Not** needed for the server/gate path. |
+| Tool  | Version                                       | How to get it                       | Notes                                                                                                                                                                                                    |
+| ----- | --------------------------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Node  | **22.23.x** (`.nvmrc`; engines `>=22.12 <23`) | `brew install node@22` (keg-only)   | System node may be newer and is rejected by AFFiNE. Put it on PATH **for the shell only** — do not touch your rc: `export PATH="$(brew --prefix node@22)/bin:$PATH"`. The gate script does this for you. |
+| Yarn  | **4.13.0**                                    | bundled corepack: `corepack yarn …` | From `packageManager`. Set `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`.                                                                                                                                          |
+| Rust  | **1.96.0**                                    | pre-existing (Homebrew)             | Matches `rust-toolchain.toml`. Only needed to build native addons, not the gate.                                                                                                                         |
+| cmake | any recent                                    | `brew install cmake`                | Needed by `@affine/native` (desktop). **Not** needed for the server/gate path.                                                                                                                           |
 
 Install (once): `ELECTRON_SKIP_BINARY_DOWNLOAD=1 HUSKY=0 corepack yarn install`.
 
@@ -60,6 +60,7 @@ throwaway DB.
   (bead `affine-4yo.7`). Keep the habit regardless.
 
 Standard environment for any test/gate/DB command:
+
 ```
 export PATH="$(brew --prefix node@22)/bin:$PATH"
 export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
@@ -70,6 +71,7 @@ export AFFINE_INDEXER_ENABLED=false   # self-host parity; avoids needing Mantico
 ```
 
 One-time DB setup against the disposable stack (idempotent; safe to re-run):
+
 ```
 corepack yarn workspace @affine/server prisma generate
 corepack yarn workspace @affine/server prisma migrate deploy   # applies all migrations
@@ -88,16 +90,21 @@ looks live** before running, in order and aborting on first failure:
 4. server AVA (targeted specs, `--forbid-only`)
 
 **Minimal tier (fast, default) — what a fresh agent runs to validate a change:**
+
 ```
 scripts/woven-ci-min.sh
 ```
+
 **Full/pre-release tier — adds the heavy server e2e suite:**
+
 ```
 scripts/woven-ci-min.sh --e2e          # or --full
 ```
+
 You can target specific AVA specs: `scripts/woven-ci-min.sh 'src/core/quota/__tests__/*.spec.ts'`.
 
 ### Gotchas that will waste your time if you skip them
+
 - **Run AVA via the wrapper** `yarn affine @affine/server test …` / `… e2e …`,
   **not** `yarn workspace @affine/server test`. The wrapper installs the TS/ESM
   loader; without it AVA cannot resolve `src/prelude.ts`.
@@ -116,6 +123,7 @@ You can target specific AVA specs: `scripts/woven-ci-min.sh 'src/core/quota/__te
 A shared, deterministic-shape fixture (owner + N accepted members + root doc)
 lives in `packages/backend/server/src/__tests__/fixtures/woven-workspace.ts`
 (`seedWovenWorkspace`). The **same helper** backs both:
+
 - the seed CLI: `corepack yarn affine @affine/server seed WovenWorkspace`
   (`members=8n`, `id=…`, `email=…` overrides; run `seed --help` for all), and
 - an e2e that asserts it persists:
@@ -139,6 +147,7 @@ bd update <id> --claim
 # … do the work; keep --notes current-state (COMPLETED/IN-PROGRESS/NEXT/BLOCKER) …
 bd close <id>       # only when every acceptance box passes
 ```
+
 - **Conservative profile**: do **not** `git commit`/`push` or `bd dolt push`
   without explicit authority from the user.
 - File emergent work as its own bead: `bd create …` then
@@ -165,6 +174,7 @@ the gate.
 Do **not** improvise deploys. The full continuous-deploy toolchain (build →
 stage → prod → rollback), all resolving the live `woven-local` target **by
 identity**, is documented in:
+
 - **`scripts/woven-cd-runbook.md`** — the operator runbook (stage/prod/rollback,
   invariants, one-time setup).
 - **`.beads/woven-cd-gate.md`** — the validated gate design + the live-stack

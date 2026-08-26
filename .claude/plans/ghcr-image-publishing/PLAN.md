@@ -13,12 +13,13 @@
 > [findings/open-questions.md](findings/open-questions.md)
 
 ## One-paragraph summary
+
 Make the Woven fork of AFFiNE **publish its self-host server container image to
 GitHub Container Registry under `aRustyDev`** — `ghcr.io/arustydev/affine:woven-<sha>`
 (+ a moving `:woven` tag), **public** — on push to `woven/main` and on demand, so the
 ds-cleaner k3s deployment (infra epic `infra-bt6g`) can pull it. Today the fork only
 builds images **locally** (`scripts/woven-build-image.sh` → `woven/affine:<sha>`, no
-registry; that is the `affine-yiz` *local-compose* CD track). Upstream's
+registry; that is the `affine-yiz` _local-compose_ CD track). Upstream's
 `build-images.yml`/`release.yml` publish to `ghcr.io/toeverything/affine` but require
 proprietary secrets (R2/Sentry/Perfsee/AFFINE_PRO) the fork does not hold. This plan
 adds a **fork-local, rebase-safe** publish workflow (`woven-*` namespaced) that builds
@@ -26,13 +27,15 @@ the community self-host server image without those secrets and pushes it to the 
 GHCR namespace.
 
 ## Documents
-| Doc | What |
-|---|---|
-| [findings/grounding.md](findings/grounding.md) | Verified facts: upstream build pipeline, Dockerfile, required vs optional secrets, existing fork CD, GHCR mechanics |
-| [findings/decision-log.md](findings/decision-log.md) | D1–D6 |
-| [findings/open-questions.md](findings/open-questions.md) | OQ-0 (beads migration blocker) … |
+
+| Doc                                                      | What                                                                                                                |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| [findings/grounding.md](findings/grounding.md)           | Verified facts: upstream build pipeline, Dockerfile, required vs optional secrets, existing fork CD, GHCR mechanics |
+| [findings/decision-log.md](findings/decision-log.md)     | D1–D6                                                                                                               |
+| [findings/open-questions.md](findings/open-questions.md) | OQ-0 (beads migration blocker) …                                                                                    |
 
 ## Prime-directive note (fork policy)
+
 Per `scripts/woven-agent-bootstrap.md`: this is a hybrid fork. This work is **additive
 infrastructure**, not a core patch — it is `woven-*` namespaced and rebase-safe against
 weekly `canary` merges. It does **not** touch upstream `build-images.yml`/`release.yml`
@@ -40,12 +43,13 @@ weekly `canary` merges. It does **not** touch upstream `build-images.yml`/`relea
 upstreamed) because it hardcodes the fork's registry + drops the proprietary build legs.
 
 ## Operator decisions baked in (see decision-log)
+
 - **D1 — Public GHCR package** (mirrors the infra-side D2). No token handoff to the
   cluster; the cross-DB contract is simply "a public, pullable image exists".
 - **D2 — New fork-local workflow, do NOT edit upstream `build-images.yml`.** Add
   `.github/workflows/woven-publish-image.yml`; derive the owner from
   `${{ github.repository_owner }}` (never hardcode `toeverything`). Rebase-safe.
-- **D3 — Self-host *server* image only.** Build web + admin + server (+ server-native for
+- **D3 — Self-host _server_ image only.** Build web + admin + server (+ server-native for
   the target arch); skip mobile/desktop. This is the single-container self-host image the
   ds-cleaner chart runs — not the multi-service cloud topology.
 - **D4 — Build without proprietary secrets.** R2/Sentry/Perfsee are source-map/telemetry
@@ -58,9 +62,10 @@ upstreamed) because it hardcodes the fork's registry + drops the proprietary bui
   `linux/arm/v7` and (probably) `arm64` to keep CI fast. Multi-arch is a later nicety.
 
 ## Phases (beads epic `affine-3ab`, tasks `.1`–`.4` = A0–A3)
+
 - **A0 — Build spike.** Determine the minimal community self-host image build in CI:
   which upstream secrets are truly required vs safely-empty (R2/Sentry/Perfsee/AFFINE_PRO),
-  target arch, and whether to *call* upstream's reusable `build-images.yml` (needs it
+  target arch, and whether to _call_ upstream's reusable `build-images.yml` (needs it
   parametrized on registry — a minimal, arguably-upstreamable edit) or **fork the build
   steps** into `woven-*`. Produce a runnable server image locally/in a scratch CI run.
 - **A1 — Fork-local publish workflow.** `.github/workflows/woven-publish-image.yml`:
@@ -78,6 +83,7 @@ upstreamed) because it hardcodes the fork's registry + drops the proprietary bui
   where it matters (or explicitly document why they differ).
 
 ## Cross-epic dependency (the one hard link)
+
 This epic **provides** `affine-ghcr-image` (label `export:affine-ghcr-image` on A2 →
 `bd ship affine-ghcr-image` on close). The infra epic `infra-bt6g` (+ `infra-bt6g.1`)
 **depends on** `external:affine:affine-ghcr-image` and cannot cut over until it resolves
@@ -85,8 +91,9 @@ This epic **provides** `affine-ghcr-image` (label `export:affine-ghcr-image` on 
 `ghcr.io/arustydev/affine:woven-<sha>` (public); infra pins that exact ref.**
 
 ## Beads migration (RESOLVED 2026-07-13)
+
 The `affine` Dolt DB was **schema v49**; bd wanted **v53**, and refused to auto-migrate a
-*remote-backed* DB (migrating >1 clone independently forks the schema irrecoverably). This
+_remote-backed_ DB (migrating >1 clone independently forks the schema irrecoverably). This
 Mac was confirmed the **designated migrator**: safety-export (52 issues) →
 `BD_ALLOW_REMOTE_MIGRATE=1 bd migrate` (Dolt 1.0.5 → 1.1.0) → `bd dolt push` to publish the
 migrated schema. Epic `affine-3ab` was then filed. See open-questions **OQ-0** for the

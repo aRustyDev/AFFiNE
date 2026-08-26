@@ -16,7 +16,15 @@ services:
     ports:
       - '${STAGING_PG_PORT:-5442}:5432'
     healthcheck:
-      test: ['CMD', 'pg_isready', '-U', "${DB_USERNAME}", '-d', "${DB_DATABASE:-affine}"]
+      test:
+        [
+          'CMD',
+          'pg_isready',
+          '-U',
+          '${DB_USERNAME}',
+          '-d',
+          '${DB_DATABASE:-affine}',
+        ]
       interval: 3s
       timeout: 5s
       retries: 20
