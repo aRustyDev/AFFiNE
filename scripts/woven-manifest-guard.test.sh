@@ -102,11 +102,20 @@ blob="$(printf '// woven guard live-edit fixture\n' | git hash-object -w --stdin
 GIT_INDEX_FILE="$tmp_index" git read-tree "$base_ref"
 GIT_INDEX_FILE="$tmp_index" git update-index --add --cacheinfo "100644,$blob,$VICTIM"
 tree="$(GIT_INDEX_FILE="$tmp_index" git write-tree)"
-FIXTURE_REF="$(git commit-tree "$tree" -p "$base_ref" -m 'guard live-edit fixture')"
+# The identity comes from the environment, not `git config`: a GitHub runner has
+# no user.name/user.email, and commit-tree then dies with "empty ident name",
+# leaving FIXTURE_REF empty and the fixture failing for the wrong reason.
+FIXTURE_REF="$(GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
+               GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
+               git commit-tree "$tree" -p "$base_ref" -m 'guard live-edit fixture')"
 
-run_guard --head "$FIXTURE_REF"
-expect_rc 1 "policy violation"
-expect_names "$VICTIM"
+if [ -z "$FIXTURE_REF" ]; then
+  bad "could not build the live-edit fixture commit (git commit-tree produced nothing)"
+else
+  run_guard --head "$FIXTURE_REF"
+  expect_rc 1 "policy violation"
+  expect_names "$VICTIM"
+fi
 
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
