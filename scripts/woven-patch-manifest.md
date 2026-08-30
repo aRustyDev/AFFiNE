@@ -106,6 +106,7 @@ artifact. Re-run this before deleting the patch.
    On `bd lint`, ignore the epic warnings. 24 of them are epics missing `## Success Criteria`, and
    `affine-3os` deliberately keeps epics thin until they enter the execution horizon — that class
    is noise by design, so **do not gate CI on a clean lint**. Repeat this step after the PR merges.
+
 7. **Open a PR to run CI.** `build-test.yml`'s `push:` trigger covers only
    `canary`/`beta`/`stable`/`v*.x` — **not** `woven/*` — so pushing a `woven/` branch runs nothing.
    The suite runs on `pull_request:`. Target `src/__tests__/oauth/controller.spec.ts` for auth
