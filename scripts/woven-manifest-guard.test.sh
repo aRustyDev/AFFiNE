@@ -57,9 +57,32 @@ expect_names() {
 echo "== woven-manifest-guard fixtures =="
 
 # --- 1. known-good tree: 3 upstream-owned diverged files, 3 manifest rows -----
-echo "-- known-good: current tree passes"
-run_guard
+# --head is explicit so this stays a statement about the COMMITTED tree even when
+# the developer running it has unrelated edits in progress.
+echo "-- known-good: committed tree passes"
+run_guard --head HEAD
 expect_rc 0 "clean"
+
+# --- 1b. uncommitted edits are seen ------------------------------------------
+# Run locally before committing, a guard that only ever diffs HEAD reports "clean"
+# on the very change you are about to push. That is the miss this whole epic
+# exists to prevent, so with no explicit --head the guard must fold the working
+# tree in. Uses a tracked, upstream-owned, currently-unmanifested victim and puts
+# it back afterwards.
+echo "-- worktree: an uncommitted edit to an unmanifested upstream-owned file"
+WT_VICTIM="packages/backend/server/src/base/error/def.ts"
+if ! git diff --quiet -- "$WT_VICTIM" 2>/dev/null; then
+  bad "$WT_VICTIM already has uncommitted changes; skipping to avoid clobbering them"
+else
+  restore_victim() { git checkout -- "$WT_VICTIM" 2>/dev/null || true; }
+  trap 'restore_victim; rm -rf "$TMPDIR_T"' EXIT
+  printf '\n// woven guard worktree fixture\n' >> "$WT_VICTIM"
+  run_guard
+  expect_rc 1 "policy violation"
+  expect_names "$WT_VICTIM"
+  restore_victim
+  trap 'rm -rf "$TMPDIR_T"' EXIT
+fi
 
 # --- 2. the affine-hn1.1 miss is now caught ----------------------------------
 echo "-- regression: seed/index.ts row deleted (the affine-hn1.1 miss)"

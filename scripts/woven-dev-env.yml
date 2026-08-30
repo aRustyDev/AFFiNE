@@ -1,0 +1,53 @@
+# Woven fork — local dev/lint toolchain.
+#
+# Node is not installed system-wide on the Windows workstation, so the husky
+# pre-commit hook (`yarn lint-staged && yarn lint:ox`) could not run and a
+# formatting break reached CI instead — the Lint job on aRustyDev/AFFiNE#2
+# failed on `oxfmt --check .` over a Markdown file. This pins the toolchain.
+#
+# SETUP (verified end to end on win-64, 2026-08-30):
+#
+#   micromamba env create -f scripts/woven-dev-env.yml
+#   micromamba run -n affine node .yarn/releases/yarn-4.18.0.cjs install   # ~2m30s
+#
+# RUN THE GATES CI RUNS:
+#
+#   micromamba run -n affine node .yarn/releases/yarn-4.18.0.cjs lint:format   # oxfmt --check .
+#   micromamba run -n affine node .yarn/releases/yarn-4.18.0.cjs lint:ox       # oxlint --deny-warnings
+#   micromamba run -n affine node .yarn/releases/yarn-4.18.0.cjs lint-staged   # what the hook runs
+#
+# Invoke the VENDORED yarn (`.yarn/releases/yarn-4.18.0.cjs`) rather than going
+# through corepack: conda-forge's nodejs package does not bundle corepack, and
+# the vendored release is the version .yarnrc.yml already pins. One less moving
+# part, and no `npm i -g corepack` step.
+#
+# oxlint CANNOT be run standalone via npx — .oxlintrc.json loads the JS plugin
+# eslint-plugin-import-x, so it needs the repo's node_modules. oxfmt can:
+#   npx oxfmt@0.63.0 --check .
+#
+# `enableScripts: false` in .yarnrc.yml means install runs no build scripts, so
+# no Rust/native toolchain is needed just to lint. That also means the root
+# `postinstall` (`yarn affine init && yarn husky`) does NOT run, which is why
+# .husky has no `_/` wrapper directory and the hook is not actually wired up.
+#
+# actionlint (the CI Lint job runs it) is a Go binary, installed on demand into
+# this env rather than pinned here:
+#
+#   GOBIN=$MAMBA_ROOT_PREFIX/envs/affine/bin \
+#     micromamba run -n affine go install github.com/rhysd/actionlint/cmd/actionlint@latest
+#
+# nodejs is pinned to the range in package.json `engines` (>=22.12.0 <23.0.0).
+# The JS tooling itself (yarn, oxfmt, oxlint) comes from the repo, NOT from
+# conda, so package.json stays the single source of truth for those versions.
+
+name: affine
+
+channels:
+  - conda-forge
+
+dependencies:
+  - nodejs=22.22.3
+  # Used by scripts/woven-drift-sweep.sh to read `bd list --json`.
+  - jq
+  # For building actionlint (see above).
+  - go

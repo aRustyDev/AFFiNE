@@ -51,13 +51,14 @@ die()  { err "$*"; exit 2; }
 # ---- args -----------------------------------------------------------------
 BASE=""
 HEAD_REF="HEAD"
+HEAD_EXPLICIT=0
 MANIFEST="$REPO_ROOT/scripts/woven-patch-manifest.md"
 BASELINE_FILE="$REPO_ROOT/scripts/woven-upstream-baseline"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --base)     [ $# -ge 2 ] || die "--base needs a ref";      BASE="$2";     shift 2 ;;
-    --head)     [ $# -ge 2 ] || die "--head needs a ref";      HEAD_REF="$2"; shift 2 ;;
+    --head)     [ $# -ge 2 ] || die "--head needs a ref";      HEAD_REF="$2"; HEAD_EXPLICIT=1; shift 2 ;;
     --manifest) [ $# -ge 2 ] || die "--manifest needs a path"; MANIFEST="$2"; shift 2 ;;
     -h|--help)  sed -n '2,37p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *)          die "unknown argument: $1" ;;
@@ -83,7 +84,18 @@ fi
 HEAD_SHA="$(git rev-parse --verify --quiet "${HEAD_REF}^{commit}" || true)"
 [ -n "$HEAD_SHA" ] || die "cannot resolve head ref '$HEAD_REF'"
 
+# Fold in uncommitted work unless a --head was named. Run before committing, a
+# guard that only ever diffs HEAD reports "clean" on the very change you are
+# about to push — the exact miss this file exists to prevent. In CI the tree is
+# clean, so this changes nothing there; pass --head explicitly to force
+# committed-only semantics.
+WORKTREE=0
+if [ "$HEAD_EXPLICIT" -eq 0 ] && [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  WORKTREE=1
+fi
+
 log "baseline $(git rev-parse --short "$BASE_SHA")  head $(git rev-parse --short "$HEAD_SHA")"
+[ "$WORKTREE" -eq 1 ] && log "including UNCOMMITTED working-tree changes (pass --head HEAD for committed only)"
 log "manifest ${MANIFEST#"$REPO_ROOT/"}"
 
 # ---- parse the manifest ----------------------------------------------------
@@ -107,7 +119,14 @@ MANIFESTED="$(manifest_rows | sed 's#^\./##' | sed '/^$/d' | sort -u)"
 [ -n "$MANIFESTED" ] || warn "the manifest table lists no files — is the '## Diverged upstream-owned files' heading intact?"
 
 # ---- classify the divergence ----------------------------------------------
-CHANGED="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sed '/^$/d')"
+# In worktree mode diff the baseline against the working tree. Untracked files
+# are ignored on purpose: absent from the baseline, they are fork-owned by
+# definition and so can never be an unmanifested upstream-owned change.
+if [ "$WORKTREE" -eq 1 ]; then
+  CHANGED="$(git diff --name-only "$BASE_SHA" | sed '/^$/d')"
+else
+  CHANGED="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sed '/^$/d')"
+fi
 UPSTREAM_OWNED=""
 while IFS= read -r p; do
   [ -n "$p" ] || continue
@@ -133,7 +152,14 @@ STALE=""
 UNDIVERGED=""
 while IFS= read -r p; do
   [ -n "$p" ] || continue
-  if ! git cat-file -e "${HEAD_SHA}:${p}" 2>/dev/null; then
+  # Resolve the row against whatever tree we are judging: the filesystem in
+  # worktree mode, the committed tree otherwise.
+  if [ "$WORKTREE" -eq 1 ]; then
+    path_present() { [ -e "$REPO_ROOT/$1" ]; }
+  else
+    path_present() { git cat-file -e "${HEAD_SHA}:${1}" 2>/dev/null; }
+  fi
+  if ! path_present "$p"; then
     STALE="${STALE}${p}"$'\n'
   elif ! printf '%s\n' "$UPSTREAM_OWNED" | grep -qxF -- "$p"; then
     UNDIVERGED="${UNDIVERGED}${p}"$'\n'
