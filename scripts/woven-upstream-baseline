@@ -1,0 +1,18 @@
+# Woven fork — upstream baseline (read by scripts/woven-manifest-guard.sh)
+#
+# The upstream commit the fork was last merged from. Everything reachable from
+# HEAD but absent here is fork divergence; the guard requires a manifest row for
+# each such file that upstream ALSO owns.
+#
+# UPSTREAM_COMMIT is the authority, not UPSTREAM_TAG: upstream's tags are not
+# pushed to this fork's origin, so `v0.27.4` does not resolve on a CI checkout.
+# The commit does — it is the merge commit's second parent, so a full-history
+# checkout (actions/checkout with fetch-depth: 0) always has it. The tag is
+# recorded for humans.
+#
+# Update this in the SAME commit as the merge — see the merge-time checklist in
+# scripts/woven-patch-manifest.md.
+
+UPSTREAM_TAG=v0.27.4
+UPSTREAM_COMMIT=b4c8548c09da21b2898443559a5b846f0ccf5dd8
+UPSTREAM_MERGE=eac15e21bd

@@ -13,6 +13,22 @@ Only **upstream-owned** files belong in the table below. Fork-owned additions ar
 construction and are not tracked here — the CI guard's job is to fail when an upstream-owned file
 is modified _without_ a row here.
 
+That guard is **`scripts/woven-manifest-guard.sh`** (bead `affine-hn1.2`), run on every PR into
+`woven/main` by `.github/workflows/woven-manifest-guard.yml`. It decides ownership mechanically
+rather than by a path allowlist: a changed file is upstream-owned iff it also **exists at the
+upstream baseline** recorded in `scripts/woven-upstream-baseline`. It fails on an unmanifested
+upstream-owned change, and on a row whose path no longer exists in the tree. Run it locally before
+pushing:
+
+```bash
+scripts/woven-manifest-guard.sh
+```
+
+This file is therefore no longer advisory prose. It was: `affine-hn1.1` shipped a version of it
+that omitted `packages/backend/server/src/seed/index.ts` even though that commit's own audit had
+named the file, and only a human re-reading caught it. `scripts/woven-manifest-guard.test.sh`
+keeps that exact miss as a regression fixture.
+
 ## Diverged upstream-owned files
 
 | File                                                          | Category                  | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Delete when                                                                                      |
@@ -58,11 +74,43 @@ artifact. Re-run this before deleting the patch.
    fork-owned file carries a GraphQL decorator (`@Resolver`/`@ObjectType`/`@InputType`/`@Field`/
    `@Query`/`@Mutation`/`@Subscription`/`@ArgsType`/`@InterfaceType`/`registerEnumType`). Record
    which one you did.
-5. Update this manifest if the diverged set changed.
-6. **Open a PR to run CI.** `build-test.yml`'s `push:` trigger covers only
+5. **Re-point the baseline, then update this manifest if the diverged set changed.** Set
+   `UPSTREAM_TAG` / `UPSTREAM_COMMIT` in `scripts/woven-upstream-baseline` to the tag you merged
+   and its commit (`git rev-parse <merge>^2`) **in the same commit as the merge** — the guard reads
+   the commit, not the tag, because upstream's tags are not pushed to this fork's origin. Then run
+   `scripts/woven-manifest-guard.sh` until it is clean. It tells you exactly which paths need a row.
+6. **Run the plan-drift sweep before calling the merge done** (`affine-3os`, wired here by
+   `affine-hn1.3`). `affine-3os` requires a sweep over open work after every upstream merge and
+   every merged PR; for `v0.27.4` it did not run, and a hand audit five days later found drift that
+   had been sitting unflagged. Run:
+
+   ```bash
+   scripts/woven-drift-sweep.sh            # beads citing a file this merge changed
+   bd lint                                  # read the task/feature/bug rows ONLY
+   ```
+
+   The sweep is advisory — it lists candidates, you make the calls. Read each one against the diff
+   (`git diff --name-only <baseline> HEAD`) for the three drift classes the 2026-08-29 audit
+   actually found:
+
+   - **(a) satisfied** — an _open_ bead whose acceptance criteria this merge already meets. Close
+     it with the evidence. `affine-hn1.1` was fully satisfied and still open.
+   - **(b) invalidated** — an _in_progress_ bead whose analysis the merge broke: a stale image or
+     SHA, a moved path, a new migration its safety argument never accounted for. Reset it to open
+     and say in the notes that the plan is **invalid, not merely paused**. `affine-yiz` had sat 54
+     days on an image 117 commits stale, with a new CONTRACT migration it never accounted for.
+   - **(c) incidental** — a bead whose fix landed as a side effect of an unrelated commit, with
+     nothing written on the bead. Record what was fixed and what is still open. `affine-4aj` was
+     half-fixed by `4384cd820c` and nobody noted it.
+
+   On `bd lint`, ignore the epic warnings. 24 of them are epics missing `## Success Criteria`, and
+   `affine-3os` deliberately keeps epics thin until they enter the execution horizon — that class
+   is noise by design, so **do not gate CI on a clean lint**. Repeat this step after the PR merges.
+7. **Open a PR to run CI.** `build-test.yml`'s `push:` trigger covers only
    `canary`/`beta`/`stable`/`v*.x` — **not** `woven/*` — so pushing a `woven/` branch runs nothing.
    The suite runs on `pull_request:`. Target `src/__tests__/oauth/controller.spec.ts` for auth
    changes; `woven-ci-min.sh`'s default glob (`src/core/quota/__tests__/*.spec.ts`) does not cover
-   OAuth.
-7. Merging to `woven/main` triggers `woven-publish-image.yml` → GHCR. The consuming infra repo then
+   OAuth. `woven-manifest-guard.yml` runs on this same `pull_request:` trigger, for the same
+   reason — a guard wired to `push:` would never fire on this fork.
+8. Merging to `woven/main` triggers `woven-publish-image.yml` → GHCR. The consuming infra repo then
    re-pins the image **digest** (GHCR `woven-<sha>` tags are mutable).
