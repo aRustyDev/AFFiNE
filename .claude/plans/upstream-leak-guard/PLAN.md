@@ -414,9 +414,17 @@ git add scripts/woven-manifest-guard.sh scripts/woven-manifest-guard.test.sh
 git commit -m "feat(woven): outbound guard fails on a FORK-LOCAL CORE PATCH (affine-hn1.4)
 
 Delivers affine-cm9's unbuilt requirement and affine-hn1's third success
-criterion. Outbound returns before the inbound checks, so the modes cannot
-interleave; ADDITIVE divergence is explicitly asserted not to trip it, which is
-the fixture that catches a parser reading the wrong column."
+criterion.
+
+Outbound is an ADDITIONAL question, not a separate one: it runs the unmanifested
+check first and fails on it before consulting FORKLOCAL. That is what makes a
+parser gap safe. FORKLOCAL is derived from the manifest, so a row the parser
+cannot read silently leaves the set and an empty set looks exactly like nothing
+to leak -- but an unreadable row also makes its file unmanifested, so gating on
+that closes the whole class, including shapes nobody anticipated.
+
+ADDITIVE divergence is explicitly asserted not to trip the check, which is the
+fixture that catches a parser reading the wrong column."
 ```
 
 ---
