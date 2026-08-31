@@ -1,4 +1,5 @@
-# Woven fork — upstream baseline (read by scripts/woven-manifest-guard.sh)
+# Woven fork — upstream baseline (read by scripts/woven-manifest-guard.sh and
+# .husky/pre-push)
 #
 # The upstream commit the fork was last merged from. Everything reachable from
 # HEAD but absent here is fork divergence; the guard requires a manifest row for
