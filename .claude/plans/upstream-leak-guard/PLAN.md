@@ -86,7 +86,7 @@ Inline `if` / `ok` / `bad` is this file's existing idiom for assertions `expect_
 - [ ] **Step 3: Run it to verify it fails**
 
 Run: `scripts/woven-manifest-guard.test.sh 2>&1 | tail -5`
-Expected: FAIL — `exit 2; expected 0 (clean)`, because the args loop hits `*) die "unknown argument: $1"`.
+Expected: FAIL — `--outbound rejected as a usage error`, because the args loop hits `*) die "unknown argument: $1"` and exits 2.
 
 - [ ] **Step 4: Add the flag**
 
@@ -109,7 +109,7 @@ In the comment block at the top of the file, replace the `# Usage:` line and the
 ```bash
 # Usage:
 #   scripts/woven-manifest-guard.sh [--base REF] [--head REF] [--manifest PATH]
-#   scripts/woven-manifest-guard.sh --outbound [--base REF] [--head REF]
+#   scripts/woven-manifest-guard.sh --outbound [--base REF] [--head REF] [--manifest PATH]
 #
 # INBOUND (default): fail when an upstream-owned file diverges with no manifest
 # row — don't silently lose a fork patch to the next upstream merge.
