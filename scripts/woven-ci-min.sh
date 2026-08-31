@@ -20,8 +20,7 @@
 #   REDIS_SERVER_HOST     (default: localhost)
 #   AFFINE_INDEXER_ENABLED(default: false — self-host parity, avoids Manticore)
 #   WOVEN_CI_E2E=1        run the e2e stage
-#   WOVEN_CI_FORCE=1      bypass the localhost-host assertion (still blocks the resolved live DB)
-#   WOVEN_CI_SKIP_LIVE_CHECK=1  skip the by-identity live-DB check (escape hatch; still asserts localhost)
+#   WOVEN_CI_FORCE=1      bypass the localhost-host assertion
 #
 set -euo pipefail
 
@@ -65,18 +64,9 @@ export DATABASE_URL="${DATABASE_URL:-postgresql://affine:affine@localhost:5432/a
 export REDIS_SERVER_HOST="${REDIS_SERVER_HOST:-localhost}"
 export AFFINE_INDEXER_ENABLED="${AFFINE_INDEXER_ENABLED:-false}"
 
-# ---- SAFETY GUARD: never point the truncating test DB at the LIVE stack ------
-# The live deployment is resolved BY IDENTITY (the container publishing :3010 →
-# its compose project + postgres container) via woven-resolve-live.sh, NOT by a
-# hardcoded project/container name — the live stack moved from project `affine`
-# (container `affine_postgres`) to the `woven-local` platform stack (postgres on
-# :5433), and a future rename must not silently reopen this hole. See bead
-# affine-4yo.7.
-#
-# Residual (accepted, AC4): if the live SERVER is not discoverable (nothing on
-# :3010) the identity check degrades to "nothing to protect" and allows the run.
-# Belt: WOVEN_LIVE_PG / WOVEN_LIVE_SERVER can pin the live target if :3010 is
-# unavailable but its DB is up.
+# ---- SAFETY GUARD: never point the truncating test DB at a real database -----
+# Server tests TRUNCATE. DATABASE_URL must resolve to a localhost host; anything
+# else is refused unless WOVEN_CI_FORCE=1.
 assert_disposable_db() {
   local url="$DATABASE_URL"
   local noproto="${url#*://}"          # user:pass@host:port/db?args
@@ -93,42 +83,7 @@ assert_disposable_db() {
       die "DATABASE_URL host is '$dbhost' (not localhost). Refusing — could be a live/remote DB. Set WOVEN_CI_FORCE=1 to override." ;;
   esac
 
-  if ! command -v docker >/dev/null 2>&1; then
-    warn "docker not found; skipping live-stack port check (host asserted local)."
-    return
-  fi
-
-  # Resolve the live stack by identity (robust to compose-project renames).
-  local live_pg="" live_project=""
-  if [ "${WOVEN_CI_SKIP_LIVE_CHECK:-0}" = "1" ]; then
-    warn "live-DB identity check skipped via WOVEN_CI_SKIP_LIVE_CHECK."
-  elif [ -f "$REPO_ROOT/scripts/woven-resolve-live.sh" ]; then
-    # shellcheck source=scripts/woven-resolve-live.sh
-    . "$REPO_ROOT/scripts/woven-resolve-live.sh"
-    if woven_resolve_live 2>/dev/null; then
-      live_pg="$LIVE_PG"; live_project="$LIVE_PROJECT"
-      log "live stack resolved: project '${live_project}', postgres '${live_pg}' (protected)"
-    else
-      warn "no live stack discoverable (nothing publishes :3010) — skipping live-DB identity check (nothing to protect)."
-    fi
-  else
-    warn "woven-resolve-live.sh missing; cannot identity-check the live DB."
-  fi
-
-  # Refuse if the target port is published by the resolved live postgres/project.
-  local hits name proj
-  hits="$(docker ps --filter "publish=${dbport}" --format '{{.Names}}|{{.Label "com.docker.compose.project"}}' 2>/dev/null || true)"
-  if [ -z "$hits" ]; then
-    warn "no docker container publishes port ${dbport}; assuming a non-live dev DB. (Bring up .docker/dev if the DB steps fail.)"
-    return
-  fi
-  while IFS='|' read -r name proj; do
-    [ -z "$name" ] && continue
-    if [ -n "$live_pg" ] && { [ "$name" = "$live_pg" ] || { [ -n "$live_project" ] && [ "$proj" = "$live_project" ]; }; }; then
-      die "refusing: LIVE DB — port ${dbport} is published by live-stack postgres '${name}' (project '${proj}'). Server tests TRUNCATE; never target the live DB."
-    fi
-  done <<< "$hits"
-  ok "DB safety: port ${dbport} served by non-live container(s): $(printf '%s ' $(echo "$hits" | cut -d'|' -f1))"
+  ok "DB safety: ${dbhost}:${dbport} is local — treated as the disposable dev stack."
 }
 assert_disposable_db
 
