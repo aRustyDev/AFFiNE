@@ -49,8 +49,8 @@ Two reasons.
    exist there (`Base ref must be a branch`). The fork's `origin` also carries
    upstream's branch names — `origin/canary` among them — so a PR based on a
    shared name would have gone through. `gh repo set-default aRustyDev/AFFiNE`
-   (set 2026-08-31) closes that specific hole, but it is per-clone git config: a
-   fresh clone on another machine starts unprotected.
+   closes that specific hole, but it is per-clone git config — a fresh clone
+   starts unprotected, so it is a convenience, not a control.
 2. **`affine-vap` is unblocked.** Removing the self-hosted member/seat limit will
    add the second and most sensitive FORK-LOCAL CORE PATCH. The guard should
    exist before that patch does.
@@ -78,11 +78,11 @@ available to this design.
 
 ## Decision: three layers over one engine
 
-| Layer           | Mechanism                                         | Catches                                                 | Fails when                               |
-| --------------- | ------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------- |
-| 1. Prevention   | `scripts/woven-upstream-branch.sh`                | the branch never contains a fork-local patch            | the branch is made by hand instead       |
-| 2. Interception | `.husky/pre-push`                                 | any push whose destination is upstream, any branch name | `--no-verify`, or husky not bootstrapped |
-| 3. Backstop     | `woven-manifest-guard.yml`, push to `upstream/**` | the machine where the hook is dormant                   | the branch prefix is not used            |
+| Layer           | Mechanism                                         | Catches                                                 | Fails when                           |
+| --------------- | ------------------------------------------------- | ------------------------------------------------------- | ------------------------------------ |
+| 1. Prevention   | `scripts/woven-upstream-branch.sh`                | the branch never contains a fork-local patch            | the branch is made by hand instead   |
+| 2. Interception | `.husky/pre-push`                                 | any push whose destination is upstream, any branch name | `--no-verify`, or hooks not wired up |
+| 3. Backstop     | `woven-manifest-guard.yml`, push to `upstream/**` | a push the hook did not see                             | the branch prefix is not used        |
 
 Each layer covers the previous layer's failure mode. All three call the same
 engine, so there is one definition of "is this a leak".
@@ -185,7 +185,7 @@ Two decisions:
   tip to `UPSTREAM_COMMIT` is the comparison the engine already makes and avoids
   that edge case entirely.
 
-The hook is a seatbelt, not a lock: `--no-verify` walks past it. That is
+The hook is a seatbelt, not a lock: `git push --no-verify` walks past it. That is
 accepted, and is why layer 3 exists.
 
 ## Layer 3 — `woven-manifest-guard.yml`
@@ -234,20 +234,15 @@ without performing a real push.
 
 ## Risks and open items
 
-**Husky is dormant in worktrees.** `core.hooksPath` is `.husky/_`, which husky
-creates during `yarn install` and which is gitignored, so it does not exist in a
-fresh worktree. `git config --show-origin` puts `core.hooksPath` in the shared
-`.git/config`; the existing `WorktreeCreate`/`SessionStart` hook in
-`.claude/settings.local.json` runs `git config --worktree --unset
-core.hooksPath`, which clears only a worktree-scoped value and so has nothing to
-remove. `extensions.worktreeConfig` is `true`, so the mechanism is available.
-Layer 2 is therefore inert until a checkout has run `yarn install` under the
-`affine` micromamba environment. This is a known limitation covered by layer 3,
-not a blocker for this bead; the hook configuration itself is out of scope here.
+**Layer 2 runs only where git hooks are wired up.** A hook is per-checkout and
+`git push --no-verify` bypasses it, so layer 2 cannot be the only control. That
+is what layer 3 is for. The hook itself takes no dependency beyond git, so it
+works in a checkout with nothing installed, and its fixtures invoke it directly
+rather than through git so its coverage never depends on the wiring.
 
 **Layer 3 depends on a naming convention.** If an upstream-bound branch is made
-by hand without the `upstream/` prefix, CI does not fire. Layer 2 covers this
-when installed; layer 1 makes the prefix automatic when used.
+by hand without the `upstream/` prefix, CI does not fire. Layer 2 covers that
+case; layer 1 makes the prefix automatic when used.
 
 **The guard is only as good as the category column.** `affine-vap` must land its
 row marked `FORK-LOCAL CORE PATCH`. The inbound guard already forces a row to

@@ -12,26 +12,17 @@
 
 ---
 
-## Environment
+## Before you start
 
-Run every command from the worktree root. Node is **not** on `PATH` by default; the `affine` micromamba environment provides it:
+Run every command from the repository root.
 
-```bash
-micromamba run -n affine node --version
-```
+Everything this plan adds is pure `bash` / `sh` and runs with no toolchain beyond git — deliberately, since `.husky/pre-push` has to work in a checkout where nothing is installed. Markdown formatting is handled by the pre-commit hook (`lint-staged` runs `oxfmt` over staged files), so it needs no step of its own.
 
-Nothing in this plan needs node except `oxfmt` for Markdown formatting. Every script here is pure bash and runs without it.
-
-Commits use `--no-verify` while `.husky/_` is absent (husky is bootstrapped by `yarn install`, and `.husky/_` is gitignored). Format changed Markdown by hand instead:
-
-```bash
-micromamba run -n affine npx --yes oxfmt@0.63.0 --write <file.md>
-```
-
-New scripts must be marked executable for git, or CI cannot run them:
+One repo-specific trap: **a new script must carry the executable bit in git, or CI cannot run it.** Adding a file does not always preserve the filesystem mode, so set it explicitly and verify it landed:
 
 ```bash
 git update-index --chmod=+x scripts/<name>.sh
+git ls-files -s scripts/<name>.sh   # must start 100755
 ```
 
 ## File Structure
@@ -144,7 +135,7 @@ Expected: `== 14 passed, 0 failed ==`
 
 ```bash
 git add scripts/woven-manifest-guard.sh scripts/woven-manifest-guard.test.sh
-git commit --no-verify -m "feat(woven): accept --outbound in the manifest guard (affine-hn1.4)
+git commit -m "feat(woven): accept --outbound in the manifest guard (affine-hn1.4)
 
 The flag is parsed and documented but does nothing yet, so the inbound
 behaviour is provably unchanged: 14/14 with the existing 13 assertions intact."
@@ -251,7 +242,7 @@ Expected: `== 16 passed, 0 failed ==` — the two new assertions plus the origin
 
 ```bash
 git add scripts/woven-manifest-guard.sh scripts/woven-manifest-guard.test.sh
-git commit --no-verify -m "feat(woven): read the manifest category column, fail closed (affine-hn1.4)
+git commit -m "feat(woven): read the manifest category column, fail closed (affine-hn1.4)
 
 manifest_rows() now emits path<TAB>category and the inbound consumer takes
 field 1 — one parser, one section-scoping rule, no second copy (affine-tpb).
@@ -359,7 +350,7 @@ Expected: `rc=0` — inbound still clean.
 
 ```bash
 git add scripts/woven-manifest-guard.sh scripts/woven-manifest-guard.test.sh
-git commit --no-verify -m "feat(woven): outbound guard fails on a FORK-LOCAL CORE PATCH (affine-hn1.4)
+git commit -m "feat(woven): outbound guard fails on a FORK-LOCAL CORE PATCH (affine-hn1.4)
 
 Delivers affine-cm9's unbuilt requirement and affine-hn1's third success
 criterion. Outbound returns before the inbound checks, so the modes cannot
@@ -420,7 +411,7 @@ This should pass immediately — Task 3 already implemented the behaviour. If it
 
 ```bash
 git add scripts/woven-manifest-guard.test.sh
-git commit --no-verify -m "test(woven): known-good outbound fixture (affine-hn1.4)
+git commit -m "test(woven): known-good outbound fixture (affine-hn1.4)
 
 The counter-fixture to the leak case: a guard that always failed would satisfy
 every outbound assertion so far. Builds the branch woven-upstream-branch.sh will
@@ -468,7 +459,7 @@ Expected: `== 21 passed, 0 failed ==`
 
 ```bash
 git add scripts/woven-upstream-baseline
-git commit --no-verify -m "feat(woven): record UPSTREAM_REPO in the baseline (affine-hn1.4)
+git commit -m "feat(woven): record UPSTREAM_REPO in the baseline (affine-hn1.4)
 
 The pre-push hook matches the push destination URL rather than the remote's
 name, so it needs upstream's identity stated somewhere. It belongs next to
@@ -737,7 +728,7 @@ If test 2 reports "a branch was left behind", the guard call is happening after 
 ```bash
 git add scripts/woven-upstream-branch.sh scripts/woven-upstream-branch.test.sh
 git update-index --chmod=+x scripts/woven-upstream-branch.sh scripts/woven-upstream-branch.test.sh
-git commit --no-verify -m "feat(woven): woven-upstream-branch.sh, a branch that cannot carry a leak (affine-hn1.4)
+git commit -m "feat(woven): woven-upstream-branch.sh, a branch that cannot carry a leak (affine-hn1.4)
 
 Branches from UPSTREAM_COMMIT rather than woven/main and carries over only the
 named files, so a fork-local patch is absent by construction rather than caught
@@ -851,9 +842,8 @@ Create `.husky/pre-push`:
 #
 # Pure sh, no node: this must work in a checkout where nothing is installed.
 #
-# This is a seatbelt, not a lock — `git push --no-verify` walks past it, and it
-# is dormant until husky bootstraps .husky/_. The CI job on upstream/** is the
-# backstop for both.
+# This is a seatbelt, not a lock — `git push --no-verify` walks past it. The CI
+# job on upstream/** is the backstop.
 
 remote_url="${2:-}"
 [ -n "$remote_url" ] || exit 0
@@ -905,7 +895,7 @@ If the fork URLs are refused, the `case` match is too loose — check that `aRus
 ```bash
 git add .husky/pre-push scripts/woven-pre-push.test.sh
 git update-index --chmod=+x .husky/pre-push scripts/woven-pre-push.test.sh
-git commit --no-verify -m "feat(woven): pre-push hook refuses an upstream-directed leak (affine-hn1.4)
+git commit -m "feat(woven): pre-push hook refuses an upstream-directed leak (affine-hn1.4)
 
 Keys on the destination URL rather than the remote's NAME, and guards the branch
 tip against the baseline rather than the pushed range — git reports an all-zeros
@@ -985,7 +975,7 @@ if: github.event_name != 'push'
 - [ ] **Step 4: Check the YAML parses**
 
 ```bash
-micromamba run -n affine npx --yes js-yaml .github/workflows/woven-manifest-guard.yml > /dev/null && echo "YAML OK"
+npx js-yaml .github/workflows/woven-manifest-guard.yml > /dev/null && echo "YAML OK"
 ```
 
 Expected: `YAML OK`
@@ -1002,7 +992,7 @@ Expected: both job keys present, each with its own `if:`.
 
 ```bash
 git add .github/workflows/woven-manifest-guard.yml
-git commit --no-verify -m "ci(woven): run the outbound guard on push to upstream/** (affine-hn1.4)
+git commit -m "ci(woven): run the outbound guard on push to upstream/** (affine-hn1.4)
 
 Extends the existing workflow rather than adding a second one — it already runs
 the fixture suites, and two workflows over overlapping fixtures would drift.
@@ -1060,34 +1050,26 @@ calling `scripts/woven-manifest-guard.sh --outbound`:
    upstream baseline rather than `woven/main`, so the branch cannot carry a
    fork-local patch. Start here.
 2. `.husky/pre-push` — refuses a push whose destination URL is `UPSTREAM_REPO`.
-   Bypassable with `--no-verify`, and dormant until `yarn install` has
-   bootstrapped `.husky/_`.
-3. CI on push to `upstream/**` — the backstop for a checkout where the hook never
-   installed.
+   Bypassable with `git push --no-verify`.
+3. CI on push to `upstream/**` — the backstop for a push the hook did not see.
 
 The prepared branch is a starting point: review, cherry-pick and squash it as
 needed. The clean result the preparer reports describes the branch at creation,
 not the branch you eventually push — which is why the last two exist.
 ````
 
-- [ ] **Step 3: Format both files**
-
-```bash
-micromamba run -n affine npx --yes oxfmt@0.63.0 --write scripts/woven-patch-manifest.md scripts/woven-agent-bootstrap.md
-```
-
-- [ ] **Step 4: Confirm the manifest still parses after editing**
+- [ ] **Step 3: Confirm the manifest still parses after editing**
 
 The guard reads this file. An edit that broke the table heading or a row would be caught here.
 
 Run: `scripts/woven-manifest-guard.test.sh`
 Expected: `== 21 passed, 0 failed ==`
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add scripts/woven-patch-manifest.md scripts/woven-agent-bootstrap.md
-git commit --no-verify -m "docs(woven): document the outbound rule and how to upstream a change (affine-hn1.4)
+git commit -m "docs(woven): document the outbound rule and how to upstream a change (affine-hn1.4)
 
 The manifest gains the outbound half next to the inbound one, and says plainly
 that column 2 is now enforced rather than documentation. The bootstrap gains the
@@ -1149,10 +1131,10 @@ bd note affine-vap "affine-hn1.4 landed the outbound leak guard: scripts/woven-m
 git push -u origin claude/affine-hn1.4-leak-guard
 ```
 
-Then create the PR against the fork — `gh repo set-default aRustyDev/AFFiNE` was set on 2026-08-31, so a bare `gh pr create` resolves correctly; pass `--repo aRustyDev/AFFiNE` anyway if there is any doubt:
+Target the **fork**, explicitly. `gh` resolves to the parent repo by default when an `upstream` remote is present — the very near-miss this bead exists to prevent:
 
 ```bash
-gh pr create --base woven/main --title "feat(woven): outbound upstream-leak guard (affine-hn1.4)" --body-file .claude/plans/upstream-leak-guard/DESIGN.md
+gh pr create --repo aRustyDev/AFFiNE --base woven/main --title "feat(woven): outbound upstream-leak guard (affine-hn1.4)" --body-file .claude/plans/upstream-leak-guard/DESIGN.md
 ```
 
 - [ ] **Step 7: Close the bead once CI is green**
@@ -1169,4 +1151,4 @@ Do not close before the checks pass. The close reason must name the evidence: th
 
 **Do not duplicate the manifest parser.** `woven-upstream-branch.sh` and `.husky/pre-push` both call the guard and read its exit code. If you find yourself parsing the manifest anywhere else, the design has drifted.
 
-**Husky is dormant here.** `core.hooksPath` is `.husky/_`, which `yarn install` creates and `.gitignore` excludes, so the hook will not fire in a fresh worktree. That is expected and is why the CI backstop exists. `scripts/woven-pre-push.test.sh` invokes the hook directly, so its coverage does not depend on husky working.
+**Keep the hook free of dependencies.** `.husky/pre-push` is plain `sh` calling a bash script, and must stay that way: it has to work in a checkout where nothing is installed. `scripts/woven-pre-push.test.sh` invokes it directly rather than through git, so its coverage never depends on the hook being wired up.
