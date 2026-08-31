@@ -1,0 +1,92 @@
+# woven pre-push — refuse to push a FORK-LOCAL CORE PATCH to upstream.
+#
+# git passes the remote NAME as $1 and the remote URL as $2. We key on the URL:
+# a remote called "upstream" proves nothing, and a second remote pointing at the
+# same place would slip past a name check. UPSTREAM_REPO lives in
+# scripts/woven-upstream-baseline, next to the commit pin.
+#
+# Guards the branch TIP against the baseline rather than the pushed range: git
+# supplies the range on stdin, and the remote sha is all-zeros for a branch the
+# remote has not seen. The tip-vs-baseline comparison is the one the guard
+# already makes, and has no such edge case.
+#
+# Pure sh, no node: this must work in a checkout where nothing is installed.
+#
+# This is a seatbelt, not a lock — `git push --no-verify` walks past it. The CI
+# job on upstream/** is the backstop.
+#
+# FAIL-CLOSED BY DESIGN: every check below that cannot establish "this push is
+# definitely not headed to upstream" refuses the push (nonzero exit) instead of
+# waving it through. An empty destination URL, an unresolvable repo root, a
+# missing or unparseable baseline, and a missing or non-executable guard are all
+# silence that would otherwise be read as success — that exact shape (absence
+# read as success) is the bug class every review round on this plan has found.
+# `--no-verify` remains the escape hatch for a genuinely broken environment;
+# this hook does not hand out an equivalent for free by exiting 0 when it does
+# not know the answer.
+#
+# TESTING SEAM: WOVEN_GUARD overrides the guard binary invoked below (default
+# scripts/woven-manifest-guard.sh) — the same seam, and the same reason, as
+# scripts/woven-upstream-branch.sh. It is what lets a fixture force a violation
+# (exit 1) or a clean result (exit 0) from the guard on demand, so the hook's
+# own dispatch logic can be tested without depending on what the current branch
+# happens to carry — a fixture that depends on the branch's content will rot.
+
+remote_url="${2:-}"
+if [ -z "$remote_url" ]; then
+  printf '%s\n' "[woven pre-push] no remote URL supplied (\$2 empty) — cannot confirm this push is not headed to upstream. Refusing." >&2
+  exit 1
+fi
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$repo_root" ]; then
+  printf '%s\n' "[woven pre-push] could not resolve the repository root — refusing rather than pushing blind." >&2
+  exit 1
+fi
+
+baseline="$repo_root/scripts/woven-upstream-baseline"
+guard="${WOVEN_GUARD:-$repo_root/scripts/woven-manifest-guard.sh}"
+
+if [ ! -f "$baseline" ]; then
+  printf '%s\n' "[woven pre-push] baseline file missing ($baseline) — cannot tell upstream from anywhere else. Refusing." >&2
+  exit 1
+fi
+
+upstream_repo="$(sed -n 's/^UPSTREAM_REPO=//p' "$baseline" | head -1)"
+if [ -z "$upstream_repo" ]; then
+  printf '%s\n' "[woven pre-push] UPSTREAM_REPO not found or empty in $baseline — cannot tell upstream from anywhere else. Refusing." >&2
+  exit 1
+fi
+
+# Case-insensitively substring-match owner/repo against the URL, with and
+# without a .git suffix and with any number of trailing slashes. Trailing
+# slashes are stripped BEFORE the .git suffix, not after: "AFFiNE.git/" ends in
+# neither ".git" nor "/" immediately after the owner/repo, so stripping only
+# "\.git$" leaves it matching neither case pattern below and the push sails
+# through unnoticed. Normalising the slash first is what closes that hole.
+needle="$(printf '%s' "$upstream_repo" | tr '[:upper:]' '[:lower:]')"
+haystack="$(printf '%s' "$remote_url" | tr '[:upper:]' '[:lower:]' | sed -e 's:/*$::' -e 's/\.git$//')"
+
+case "$haystack" in
+  *"$needle") ;;
+  *"$needle"/*) ;;
+  *)
+    exit 0
+    ;;
+esac
+
+printf '%s\n' "[woven pre-push] destination is UPSTREAM ($upstream_repo) — running the outbound guard." >&2
+
+if [ ! -x "$guard" ]; then
+  printf '%s\n' "[woven pre-push] guard not found or not executable ($guard) — cannot verify this push is clean. Refusing." >&2
+  exit 1
+fi
+
+if "$guard" --outbound --head HEAD; then
+  exit 0
+fi
+
+printf '%s\n' "[woven pre-push] PUSH REFUSED. This branch carries a FORK-LOCAL CORE PATCH (or the guard could not judge it — see output above)." >&2
+printf '%s\n' "[woven pre-push] Prepare an upstream branch instead:" >&2
+printf '%s\n' "[woven pre-push]   scripts/woven-upstream-branch.sh <name> <path>..." >&2
+exit 1
