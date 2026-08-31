@@ -58,8 +58,10 @@ jobs:
 
       # Build context is filtered by the committed root .dockerignore (keeps the
       # tests/*, blocksuite/**, packages/*, tools/* workspaces yarn --immutable
-      # needs; drops node_modules/.git/target). NOT scripts/woven.dockerignore,
-      # which excludes tests/ and would drop 8 workspace package.json (-> YN0028).
+      # needs; drops node_modules/.git/target). Do not reintroduce a fork-local
+      # ignore file here: scripts/woven.dockerignore excluded tests/ and dropped 8
+      # workspace package.json (-> yarn --immutable YN0028). It was fixed for CI in
+      # 4384cd820c and deleted outright on 2026-08-31 (bead affine-4aj).
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 

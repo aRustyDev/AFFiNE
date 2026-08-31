@@ -8,10 +8,13 @@ and the beads task workflow.
 
 One safety rule that must not be missed: **server tests `TRUNCATE` the database.
 Only ever point `DATABASE_URL` at the disposable stack (`localhost:5432`), never
-at the live `woven-local` Postgres (`127.0.0.1:5433`).**
+at any database you care about.**
 
-Deployment/CD lives in `scripts/woven-cd-runbook.md`; the validated gate design
-and live-stack topology in `.beads/woven-cd-gate.md`.
+Deployment/CD is **not in this repo**. Merging to `woven/main` publishes
+`ghcr.io/arustydev/affine:woven-<sha>` via `.github/workflows/woven-publish-image.yml`;
+the `infrastructure` repo (`products/affine/kube`) re-pins that image **digest**
+and applies. There is no deploy step to run from here — see
+`scripts/woven-agent-bootstrap.md` §7.
 
 > Note: the repo ignores root-level `*.md` (`.gitignore` `/*.md`), so this file
 > is present in the working tree (auto-discovered by agent tooling) but not

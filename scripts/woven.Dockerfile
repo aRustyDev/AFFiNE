@@ -1,18 +1,18 @@
 # syntax=docker/dockerfile:1.7
 #
 # woven.Dockerfile — build a runnable AFFiNE server image for the FORK entirely
-# FROM SOURCE, natively for the build platform (linux/arm64 under OrbStack). This
-# sidesteps the host cross-arch problem of the shipped packaging-only Dockerfile
-# (.github/deployment/node/Dockerfile), which expects prebuilt dist + node_modules
-# and a per-arch server-native .node produced by CI.
+# FROM SOURCE. This sidesteps the host cross-arch problem of the shipped
+# packaging-only Dockerfile (.github/deployment/node/Dockerfile), which expects
+# prebuilt dist + node_modules and a per-arch server-native .node produced by CI.
 #
-# The fork cannot push to ghcr.io/toeverything, so builds are LOCAL-only, tagged
-# woven/affine:<git-short-sha> by scripts/woven-build-image.sh.
+# BUILT BY CI, NOT LOCALLY. .github/workflows/woven-publish-image.yml is the only
+# consumer: on push to woven/main (and on workflow_dispatch) it builds this file
+# for linux/amd64 and pushes ghcr.io/${owner}/affine:woven-<sha> plus the floating
+# :woven. The infrastructure repo pins the resulting DIGEST. The former local
+# builder (scripts/woven-build-image.sh, which forced linux/arm64) was removed
+# with the local-compose CD path on 2026-08-31 — see affine-yiz.
 #
-# NOTE: this from-source build is heavy (10-30 min, >=8 GB RAM, network) and is a
-# DEFERRED deliverable — validate the promote/staging orchestration first with the
-# upstream image via WOVEN_IMAGE passthrough. Expect to iterate on this file on the
-# first real build.
+# NOTE: this from-source build is heavy (10-30 min, >=8 GB RAM, network).
 ARG NODE_IMAGE=node:22-bookworm-slim
 
 # ---- builder: full toolchain, build frontend + rust + server ---------------
@@ -21,8 +21,8 @@ WORKDIR /app
 ARG BUILD_TYPE=stable
 ARG APP_VERSION=0.0.0-woven
 # GITHUB_SHA short-circuits html-plugin.ts gitShortHash() (tools/cli), so the
-# frontend build does NOT need a .git dir in the context — woven.dockerignore
-# intentionally drops .git. Without this the rspack build throws
+# frontend build does NOT need a .git dir in the context — the committed root
+# .dockerignore drops .git. Without this the rspack build throws
 # "Failed to open git repo" (swallowed as exit 0), leaving empty dist dirs.
 ENV BUILD_TYPE=${BUILD_TYPE} HUSKY=0 ELECTRON_SKIP_BINARY_DOWNLOAD=1 \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0 CARGO_TERM_COLOR=never \

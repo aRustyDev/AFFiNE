@@ -51,13 +51,15 @@ throwaway DB.
   postgres → `localhost:5432`, redis → `localhost:6379`, mailpit → `1025/8025`.
   (Both `.docker/dev/compose.yml` and `.env` are git-excluded; copy from the
   `*.example` if missing.)
-- 🚨 **The live deployment is the `woven-local` platform stack**, whose Postgres
-  is published on **`127.0.0.1:5433`** (container `woven-local-postgres-1`).
-  **Never point `DATABASE_URL` at `:5433`** — that is the live multi-tenant DB
-  and the tests would wipe it. The disposable stack is `:5432`. The gate now
-  enforces this mechanically: `scripts/woven-ci-min.sh` resolves the live stack
-  by identity (`woven-resolve-live.sh`) and refuses if `DATABASE_URL` targets it
-  (bead `affine-4yo.7`). Keep the habit regardless.
+- 🚨 **Server tests `TRUNCATE` the database.** Only ever point `DATABASE_URL` at
+  the disposable stack (`localhost:5432`). `scripts/woven-ci-min.sh` enforces
+  that the host is local and refuses anything else (override:
+  `WOVEN_CI_FORCE=1`). Historically this repo also ran a co-located `woven-local`
+  compose stack whose live Postgres sat on `127.0.0.1:5433`, and the gate
+  resolved and blocked it by identity (bead `affine-4yo.7`); that stack and its
+  resolver went with the local-compose CD path (`affine-yiz`, closed superseded
+  2026-08-31). The database now lives in the k3s cluster and is not reachable
+  from a dev machine by default. Keep the habit regardless.
 
 Standard environment for any test/gate/DB command:
 
@@ -171,15 +173,29 @@ the gate.
 
 ## 7. Deployment / CD
 
-Do **not** improvise deploys. The full continuous-deploy toolchain (build →
-stage → prod → rollback), all resolving the live `woven-local` target **by
-identity**, is documented in:
+**There is no deploy step in this repo, and nothing here talks to the live
+deployment.** Do not improvise one.
 
-- **`scripts/woven-cd-runbook.md`** — the operator runbook (stage/prod/rollback,
-  invariants, one-time setup).
-- **`.beads/woven-cd-gate.md`** — the validated gate design + the live-stack
-  topology (§9) and every gotcha discovered building it.
+The pipeline is: merge to `woven/main` →
+`.github/workflows/woven-publish-image.yml` builds `scripts/woven.Dockerfile`
+and pushes `ghcr.io/arustydev/affine:woven-<sha>` (plus the floating `:woven`) →
+the **`infrastructure`** repo (`products/affine/kube`) re-pins the image
+**digest** — GHCR `woven-<sha>` tags are mutable, so the digest is authoritative
+— and applies with OpenTofu. Deploy questions belong to that repo and its beads
+DB (run `bd` from the `infrastructure` checkout).
 
-`prod` and `rollback` edit live infrastructure and require typed confirmation —
-they are the only `woven-*` scripts that touch the live stack; `stage`,
-`backup`, `rehearsal`, and `restore` are read-only or fully isolated.
+Before merging, mind the manifest checklist step 2: a **CONTRACT** migration
+(DROP / retype / tighten) makes image rollback impossible — per `affine-tc6`
+there is no "database is newer than me, refuse to start" guard and no
+down-migration path. Require a **verified-restorable** backup before deploying
+across one. Backup/restore is a cluster-side (CNPG) concern; see
+`docs/src/operations/affine-pg-restore-drill.md` in the infrastructure repo.
+
+> History: a local-compose CD toolchain (`woven-promote.sh` stage/prod/rollback,
+> `woven-build-image.sh`, `woven-backup.sh`/`woven-restore.sh`,
+> `woven-migration-rehearsal.sh`, `woven-resolve-live.sh`, `woven-cd-runbook.md`)
+> lived in `scripts/` and targeted a `woven-local` docker stack on one operator's
+> machine. It was never used for a production cutover and was removed on
+> 2026-08-31 with `affine-yiz`. `git log -- scripts/woven-promote.sh` has it if
+> you need the prior art — but note `woven-build-image.sh` hard-asserted
+> `linux/arm64`, while the CI image is `amd64`.
