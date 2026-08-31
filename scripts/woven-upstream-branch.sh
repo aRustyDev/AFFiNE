@@ -71,7 +71,12 @@ FROM_SHA="$(git rev-parse --verify --quiet "${FROM}^{commit}" || true)"
 [ -n "$FROM_SHA" ] || die "cannot resolve --from ref '$FROM'"
 
 BRANCH="upstream/${NAME}"
-git rev-parse --verify --quiet "$BRANCH" >/dev/null && die "branch $BRANCH already exists"
+# refs/heads/ anchored: an unanchored `git rev-parse --verify` also resolves
+# refs/remotes/<remote>/<name> — a remote literally named "upstream" makes
+# upstream/canary and upstream/HEAD resolve as if a LOCAL branch already
+# existed, refusing the exact names a contributor reaches for first even
+# though `git branch "$BRANCH"` below would have been perfectly happy.
+git show-ref --verify --quiet "refs/heads/$BRANCH" && die "branch $BRANCH already exists"
 
 # Build the candidate commit with plumbing against a scratch index, so nothing
 # exists to clean up if the guard refuses it.
@@ -79,29 +84,69 @@ TMP_INDEX="$(mktemp -u)"
 trap 'rm -f "$TMP_INDEX"' EXIT
 GIT_INDEX_FILE="$TMP_INDEX" git read-tree "$BASE_SHA" || die "could not seed a scratch index from the baseline"
 
+CARRIED_PATHS=()
 for p in "$@"; do
   entry="$(git ls-tree "$FROM_SHA" -- "$p")"
   [ -n "$entry" ] || die "no such file at ${FROM}: $p"
   mode="$(printf '%s' "$entry" | awk '{print $1}')"
   blob="$(printf '%s' "$entry" | awk '{print $3}')"
+  # A directory (mode 040000) or gitlink (mode 160000) must be rejected on
+  # purpose, not by accident. `git ls-tree REF -- path` on a directory returns
+  # a single well-formed 040000 line — [-n "$entry"] alone does not catch it —
+  # and while --cacheinfo happens to reject 040000 with git's raw plumbing
+  # error, it ACCEPTS 160000 (a gitlink/submodule commit reference), silently
+  # carrying a submodule pointer instead of the file the operator named.
+  case "$mode" in
+    100644|100755|120000) ;;
+    *) die "not a regular file at ${FROM}: $p (mode $mode)" ;;
+  esac
   GIT_INDEX_FILE="$TMP_INDEX" git update-index --add --cacheinfo "${mode},${blob},${p}" \
     || die "could not stage $p"
+  CARRIED_PATHS+=("$p")
   log "carrying $p"
 done
 
 TREE="$(GIT_INDEX_FILE="$TMP_INDEX" git write-tree)"
 [ -n "$TREE" ] || die "could not write the candidate tree"
+
+# A tree byte-identical to the baseline is not "nothing to leak" — it is
+# nothing at all. Without this check a mistyped --from, a fix already merged
+# upstream, or simply running from a checkout sitting at the baseline all
+# produce the SAME green "safe to send upstream" signal as a real, reviewed
+# change: the guard has nothing to compare because there is no divergence to
+# see. A branch that carries no content is a usage error, not a clean result.
+BASE_TREE="$(git rev-parse "${BASE_SHA}^{tree}")"
+[ "$TREE" != "$BASE_TREE" ] || \
+  die "the named file(s) are byte-identical to the baseline ${BASE:0:9} — nothing to carry upstream. Check --from and the path(s) named."
+
 COMMIT="$(git commit-tree "$TREE" -p "$BASE_SHA" -m "${NAME}: prepared for upstream from ${BASE:0:9}")"
 [ -n "$COMMIT" ] || die "could not build the candidate commit"
 
-# One definition of "is this a leak", and it is not in this file.
-if ! "$GUARD" --outbound --head "$COMMIT"; then
-  err "refusing to create $BRANCH — see the guard output above."
-  exit 1
-fi
+# One definition of "is this a leak", and it is not in this file. The guard's
+# own exit-code contract is 0 clean / 1 policy violation / 2 usage-or-environment
+# error — collapsing those with a bare `if !` would report an unresolvable
+# baseline or an unparseable manifest row (exit 2) as "your file is a
+# fork-local patch" (exit 1), which is a misdiagnosis even though it happens to
+# fail closed either way. Capture the real code and dispatch on it explicitly.
+"$GUARD" --outbound --head "$COMMIT"
+guard_rc=$?
+case "$guard_rc" in
+  0) : ;;
+  1)
+    err "refusing to create $BRANCH — see the guard output above."
+    exit 1
+    ;;
+  *)
+    err "the guard could not judge this branch (exit $guard_rc) — see the guard output above."
+    exit 2
+    ;;
+esac
 
 git branch "$BRANCH" "$COMMIT" || die "could not create $BRANCH"
-ok "created $BRANCH from ${BASE:0:9} with $# file(s)"
+# Count what was actually staged, not argv: naming the same path twice would
+# otherwise report "2 file(s)" for a tree that carries one.
+n_carried="$(printf '%s\n' "${CARRIED_PATHS[@]}" | sort -u | sed '/^$/d' | wc -l | tr -d ' ')"
+ok "created $BRANCH from ${BASE:0:9} with $n_carried file(s)"
 
 if [ "$SWITCH" -eq 1 ]; then
   git switch "$BRANCH" || die "branch created but could not switch to it"
