@@ -329,6 +329,30 @@ else
   fi
 fi
 
+# --- 17. known-good outbound: a branch built FROM the baseline ---------------
+# The counter-fixture: a guard that simply always failed would satisfy #9. This
+# builds the branch woven-upstream-branch.sh will build — the upstream baseline
+# plus one ADDITIVE file, the manifest's own nominated upstream candidate — with
+# plumbing, so no branch, index or working tree is touched.
+echo "-- outbound: a branch based on the upstream baseline is clean"
+OB_FILE=".github/workflows/build-test.yml"
+OB_BASE="$(sed -n 's/^UPSTREAM_COMMIT=//p' "$REPO_ROOT/scripts/woven-upstream-baseline" | head -1)"
+ob_index="$TMPDIR_T/index.outbound"
+ob_mode_blob="$(git ls-tree HEAD -- "$OB_FILE" | awk '{print $1","$3}')"
+GIT_INDEX_FILE="$ob_index" git read-tree "$OB_BASE"
+GIT_INDEX_FILE="$ob_index" git update-index --add --cacheinfo "${ob_mode_blob},${OB_FILE}"
+ob_tree="$(GIT_INDEX_FILE="$ob_index" git write-tree)"
+OB_REF="$(GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
+          GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
+          git commit-tree "$ob_tree" -p "$OB_BASE" -m 'outbound known-good fixture')"
+
+if [ -z "$OB_REF" ]; then
+  bad "could not build the known-good outbound fixture commit"
+else
+  run_guard --outbound --head "$OB_REF"
+  expect_rc 0 "clean"
+fi
+
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]
