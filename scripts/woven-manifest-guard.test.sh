@@ -161,6 +161,37 @@ run_guard --outbound --manifest "$TMPDIR_T/m-badcat.md" --head HEAD
 expect_rc 2 "environment error"
 expect_names "$OIDC_PATH"
 
+# --- 9. the same bad category, INBOUND -----------------------------------
+# The category check runs before the inbound/outbound branch, so a broken
+# manifest must exit 2 regardless of direction — not just under --outbound.
+echo "-- fail closed: garbage category exits 2 inbound too, not just outbound"
+run_guard --manifest "$TMPDIR_T/m-badcat.md" --head HEAD
+expect_rc 2 "environment error"
+expect_names "$OIDC_PATH"
+
+# --- 10. fail closed: a data row that lost its backticks must not vanish -----
+# Before this fixture, split(...) < 3 fields (or a missing backtick) made a row
+# disappear silently — landing in neither MANIFESTED nor FORKLOCAL. Today
+# inbound still catches the resulting UNMANIFESTED file, but Task 3's outbound
+# check trusts absence-from-FORKLOCAL as "safe to send upstream", so a silently
+# dropped FORK-LOCAL CORE PATCH row would fail OPEN there.
+echo "-- fail closed: a data row missing its backticks exits 2, not silently dropped"
+sed "s|\`$OIDC_PATH\`|$OIDC_PATH|" "$MANIFEST" >"$TMPDIR_T/m-nobacktick.md"
+run_guard --manifest "$TMPDIR_T/m-nobacktick.md" --head HEAD
+expect_rc 2 "environment error"
+expect_names "$OIDC_PATH"
+
+# --- 11. fail closed: an empty manifest table is fatal under --outbound ------
+# Renaming the section heading makes manifest_rows emit nothing at all — no
+# BADCAT, no UNPARSED, just an empty table. Inbound only warns (existing rows
+# still get caught as UNMANIFESTED elsewhere), but outbound has nothing else to
+# catch it: comm against an empty FORKLOCAL says "safe", which is exactly
+# backwards for a guard that protects nothing.
+echo "-- fail closed: renamed section heading (empty manifest) exits 2 under --outbound"
+sed 's|^## Diverged upstream-owned files|## Renamed by mistake|' "$MANIFEST" >"$TMPDIR_T/m-renamed.md"
+run_guard --outbound --manifest "$TMPDIR_T/m-renamed.md" --head HEAD
+expect_rc 2 "environment error"
+
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

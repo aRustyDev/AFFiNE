@@ -17,9 +17,17 @@
 #                    by construction, deliberately NOT tracked in the manifest.
 #
 # CHECKS
-#   1. UNMANIFESTED — an upstream-owned file diverges with no manifest row.
-#   2. STALE ROW    — a manifest row names a path absent from the tree (upstream
-#                     deleted it, or it was renamed and the row was not updated).
+#   1. UNMANIFESTED    — an upstream-owned file diverges with no manifest row.
+#   2. STALE ROW       — a manifest row names a path absent from the tree
+#                         (upstream deleted it, or it was renamed and the row
+#                         was not updated).
+#   3. UNPARSEABLE ROW — an in-section table row that is not the header, not
+#                         the separator, and not a well-formed
+#                         `path` | category row (e.g. a missing backtick).
+#                         Never silently dropped.
+#   4. BAD CATEGORY    — a row's category, once markdown emphasis is
+#                         stripped, is not exactly ADDITIVE or FORK-LOCAL CORE
+#                         PATCH. Never guessed as ADDITIVE.
 #   Every offending path is printed, so the fix is mechanical rather than a
 #   re-audit. Rows for files that no longer diverge are reported as a WARNING
 #   only — harmless staleness, not a reason to block a PR.
@@ -27,7 +35,9 @@
 # EXIT CODES (contract — see scripts/woven-manifest-guard.test.sh)
 #   0  clean
 #   1  policy violation
-#   2  usage or environment error (unresolvable baseline, missing manifest)
+#   2  usage or environment error — unresolvable baseline, missing manifest,
+#      an unparseable manifest row, an unrecognised category, or (under
+#      --outbound) a manifest table with no rows at all.
 #
 # Usage:
 #   scripts/woven-manifest-guard.sh [--base REF] [--head REF] [--manifest PATH]
@@ -110,27 +120,60 @@ log "manifest ${MANIFEST#"$REPO_ROOT/"}"
 # Only the "## Diverged upstream-owned files" table counts. The category legend
 # above it and the measured-justification table below it are also pipe tables;
 # scoping to the section (and requiring a backticked path in COLUMN 1) keeps
-# rows like `cloudflare.com` from being mistaken for tracked files.
+# rows like `cloudflare.com` from being mistaken for tracked files. An in-section
+# row that is neither the separator, the header, nor a well-formed
+# `path` | category row is emitted on a "!UNPARSED" marker line instead of being
+# silently dropped — see the UNPARSED check below, which turns that into exit 2.
 manifest_rows() {
   awk '
     /^##[[:space:]]+Diverged upstream-owned files/ { insec = 1; next }
     insec && /^#+[[:space:]]/                      { insec = 0 }
     insec && /^[[:space:]]*\|/ {
+      if ($0 ~ /^[[:space:]]*\|[-:|[:space:]]*$/) next        # separator row
       n = split($0, f, "|")
-      if (n < 3) next
-      if (!match(f[2], /`[^`]+`/)) next
-      path = substr(f[2], RSTART + 1, RLENGTH - 2)
-      cat = f[3]
-      gsub(/[*`]/, "", cat)                 # drop markdown emphasis
-      sub(/^[[:space:]]+/, "", cat)
-      sub(/[[:space:]]+$/, "", cat)
-      print path "\t" cat
+      if (n >= 3 && match(f[2], /`[^`]+`/)) {
+        path = substr(f[2], RSTART + 1, RLENGTH - 2)
+        cat = f[3]
+        gsub(/[*_`]/, "", cat)              # drop markdown emphasis (**, __, `)
+        sub(/^[[:space:]]+/, "", cat)
+        sub(/[[:space:]]+$/, "", cat)
+        print path "\t" cat
+        next
+      }
+      hdr = f[2]; gsub(/[[:space:]]/, "", hdr)
+      if (hdr == "File") next                                  # header row
+      print "!UNPARSED\t" $0
     }
   ' "$MANIFEST"
 }
 
-MANIFESTED="$(manifest_rows | cut -f1 | sed 's#^\./##' | sed '/^$/d' | sort -u)"
-[ -n "$MANIFESTED" ] || warn "the manifest table lists no files — is the '## Diverged upstream-owned files' heading intact?"
+# Called once; MANIFESTED, the UNPARSED check and the category classification
+# below all read from this same value so the three cannot drift against
+# each other (they previously called manifest_rows twice, normalised
+# differently each time).
+ROWS="$(manifest_rows | sed 's#^\./##')"
+
+# ---- check: in-section rows that should have parsed and did not -----------
+# A row missing its backticked path, or otherwise malformed, used to vanish
+# silently (n < 3 -> skipped) — landing in neither MANIFESTED nor FORKLOCAL.
+# Inbound still caught the file as UNMANIFESTED, but outbound trusts absence
+# from FORKLOCAL as "safe to send upstream", so a silently dropped row would
+# fail OPEN there. Refuse to guess; name it and exit 2.
+UNPARSED="$(printf '%s\n' "$ROWS" | grep '^!UNPARSED' | sed 's/^!UNPARSED\t//')"
+if [ -n "$UNPARSED" ]; then
+  err "manifest row(s) in $MANIFEST that could not be parsed — refusing to guess:"
+  while IFS= read -r l; do [ -n "$l" ] && err "    $l"; done <<< "$UNPARSED"
+  err "  Each row needs: | \`path\` | **ADDITIVE** or **FORK-LOCAL CORE PATCH** | why | delete when |"
+  exit 2
+fi
+
+MANIFESTED="$(printf '%s\n' "$ROWS" | grep -v '^!UNPARSED' | cut -f1 | sed '/^$/d' | sort -u)"
+if [ -z "$MANIFESTED" ]; then
+  if [ "$OUTBOUND" -eq 1 ]; then
+    die "the manifest table in $MANIFEST lists no files — refusing to treat an empty manifest as \"nothing to leak\" under --outbound. Is the '## Diverged upstream-owned files' heading intact?"
+  fi
+  warn "the manifest table lists no files — is the '## Diverged upstream-owned files' heading intact?"
+fi
 
 # ---- classify the manifest rows by category --------------------------------
 # Column 2 is the FORK-LOCAL CORE PATCH / ADDITIVE distinction from affine-cm9.
@@ -138,19 +181,21 @@ MANIFESTED="$(manifest_rows | cut -f1 | sed 's#^\./##' | sed '/^$/d' | sort -u)"
 # a policy violation, and guessing "probably additive" is how a leak ships.
 FORKLOCAL=""
 BADCAT=""
-while IFS="$(printf '\t')" read -r p c; do
+while IFS=$'\t' read -r p c; do
   [ -n "$p" ] || continue
   case "$c" in
     "FORK-LOCAL CORE PATCH") FORKLOCAL="${FORKLOCAL}${p}"$'\n' ;;
     "ADDITIVE")              : ;;
     *)                       BADCAT="${BADCAT}${p}  [category: ${c:-<empty>}]"$'\n' ;;
   esac
-done <<< "$(manifest_rows | sed 's#^\./##')"
+done <<< "$(printf '%s\n' "$ROWS" | grep -v '^!UNPARSED')"
 
 if [ -n "$BADCAT" ]; then
-  err "manifest row(s) with an unrecognised category — refusing to guess:"
+  err "manifest row(s) in $MANIFEST with an unrecognised category — refusing to guess:"
   while IFS= read -r l; do [ -n "$l" ] && err "    $l"; done <<< "$BADCAT"
-  err "  Column 2 must be exactly **ADDITIVE** or **FORK-LOCAL CORE PATCH**."
+  err ""
+  err "  Each row needs: | \`path\` | **ADDITIVE** or **FORK-LOCAL CORE PATCH** | why | delete when |"
+  err "  Column 2 must read ADDITIVE or FORK-LOCAL CORE PATCH once markdown emphasis (*, _, \`) is stripped."
   exit 2
 fi
 FORKLOCAL="$(printf '%s' "$FORKLOCAL" | sed '/^$/d' | sort -u)"
