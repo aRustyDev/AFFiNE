@@ -192,6 +192,30 @@ sed 's|^## Diverged upstream-owned files|## Renamed by mistake|' "$MANIFEST" >"$
 run_guard --outbound --manifest "$TMPDIR_T/m-renamed.md" --head HEAD
 expect_rc 2 "environment error"
 
+# --- 12. --dump-rows exposes the classifier's real pairing (mutation-tests the case) --
+# FORKLOCAL is otherwise write-only: nothing else in the suite reads it, so
+# swapping the ADDITIVE / FORK-LOCAL CORE PATCH arms of the classifier's `case`
+# — a full inversion of the guard's purpose — would still print all-green.
+# --dump-rows is built inside the SAME case dispatch that fills FORKLOCAL (not
+# a second, driftable read of the raw manifest text), so an inverted arm
+# changes what gets printed here too — verified by hand: swapping the arms
+# flips oidc.ts to ADDITIVE and the other two rows to FORK-LOCAL CORE PATCH,
+# which this assertion would catch.
+echo "-- dump-rows: real manifest pairs each path with its actual classified category"
+run_guard --dump-rows --head HEAD
+expect_rc 0 "clean"
+DUMP_LINES="$(grep -F "$(printf '\t')" "$OUT" | sort)"
+EXPECT_LINES="$(printf '%s\n' \
+  "$OIDC_PATH"$'\t'"FORK-LOCAL CORE PATCH" \
+  ".github/workflows/build-test.yml"$'\t'"ADDITIVE" \
+  "$SEED_PATH"$'\t'"ADDITIVE" | sort)"
+if [ "$DUMP_LINES" = "$EXPECT_LINES" ]; then
+  ok "dump-rows pairs all 3 rows with the correct classified category, nothing more or less"
+else
+  bad "dump-rows output does not match the expected (path, category) pairing"
+  dump
+fi
+
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

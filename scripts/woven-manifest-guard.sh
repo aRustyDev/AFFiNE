@@ -42,11 +42,21 @@
 # Usage:
 #   scripts/woven-manifest-guard.sh [--base REF] [--head REF] [--manifest PATH]
 #   scripts/woven-manifest-guard.sh --outbound [--base REF] [--head REF] [--manifest PATH]
+#   scripts/woven-manifest-guard.sh --dump-rows [--manifest PATH]
 #
 # INBOUND (default): fail when an upstream-owned file diverges with no manifest
 # row — don't silently lose a fork patch to the next upstream merge.
 # OUTBOUND (--outbound): fail when the change set touches a file whose manifest
 # row says FORK-LOCAL CORE PATCH — don't leak a fork patch to upstream.
+# --dump-rows is a debugging aid, not a check: it prints every row the parser
+# and classifier saw — `path<TAB>category` for a row that parsed (the category
+# it was actually bucketed as, not just the raw manifest text — an inverted
+# ADDITIVE/FORK-LOCAL CORE PATCH classification would show up here), or
+# `!UNPARSED<TAB><raw line>` for one that didn't parse — then exits 0 without
+# running any of the four checks above. It answers "what did the parser and
+# classifier actually see?", which is exactly the question you want answered
+# when a row gets rejected, or when you want to confirm a path is paired with
+# the category you think it is before trusting that pairing.
 #
 # The baseline defaults to UPSTREAM_COMMIT in scripts/woven-upstream-baseline.
 # It must be RESOLVABLE: in CI use actions/checkout with fetch-depth: 0, since a
@@ -69,17 +79,19 @@ BASE=""
 HEAD_REF="HEAD"
 HEAD_EXPLICIT=0
 OUTBOUND=0
+DUMP_ROWS=0
 MANIFEST="$REPO_ROOT/scripts/woven-patch-manifest.md"
 BASELINE_FILE="$REPO_ROOT/scripts/woven-upstream-baseline"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --base)     [ $# -ge 2 ] || die "--base needs a ref";      BASE="$2";     shift 2 ;;
-    --head)     [ $# -ge 2 ] || die "--head needs a ref";      HEAD_REF="$2"; HEAD_EXPLICIT=1; shift 2 ;;
-    --manifest) [ $# -ge 2 ] || die "--manifest needs a path"; MANIFEST="$2"; shift 2 ;;
-    --outbound) OUTBOUND=1; shift ;;
-    -h|--help)  awk 'NR>1 && !/^#/{exit} NR>1' "${BASH_SOURCE[0]}"; exit 0 ;;
-    *)          die "unknown argument: $1" ;;
+    --base)       [ $# -ge 2 ] || die "--base needs a ref";      BASE="$2";     shift 2 ;;
+    --head)       [ $# -ge 2 ] || die "--head needs a ref";      HEAD_REF="$2"; HEAD_EXPLICIT=1; shift 2 ;;
+    --manifest)   [ $# -ge 2 ] || die "--manifest needs a path"; MANIFEST="$2"; shift 2 ;;
+    --outbound)   OUTBOUND=1; shift ;;
+    --dump-rows)  DUMP_ROWS=1; shift ;;
+    -h|--help)    awk 'NR>1 && !/^#/{exit} NR>1' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *)            die "unknown argument: $1" ;;
   esac
 done
 
@@ -120,16 +132,20 @@ log "manifest ${MANIFEST#"$REPO_ROOT/"}"
 # Only the "## Diverged upstream-owned files" table counts. The category legend
 # above it and the measured-justification table below it are also pipe tables;
 # scoping to the section (and requiring a backticked path in COLUMN 1) keeps
-# rows like `cloudflare.com` from being mistaken for tracked files. An in-section
-# row that is neither the separator, the header, nor a well-formed
-# `path` | category row is emitted on a "!UNPARSED" marker line instead of being
-# silently dropped — see the UNPARSED check below, which turns that into exit 2.
+# rows like `cloudflare.com` from being mistaken for tracked files. A pipe row
+# is the table's header until the separator (the `| --- | --- |` row) is seen —
+# tracked structurally so renaming the header text (e.g. "File" -> "Path") does
+# not turn a cosmetic edit into an UNPARSED failure. After the separator, an
+# in-section row that is not a well-formed `path` | category row is emitted on
+# a "!UNPARSED" marker line instead of being silently dropped — see the
+# UNPARSED check below, which turns that into exit 2.
 manifest_rows() {
   awk '
-    /^##[[:space:]]+Diverged upstream-owned files/ { insec = 1; next }
+    /^##[[:space:]]+Diverged upstream-owned files/ { insec = 1; sep_seen = 0; next }
     insec && /^#+[[:space:]]/                      { insec = 0 }
     insec && /^[[:space:]]*\|/ {
-      if ($0 ~ /^[[:space:]]*\|[-:|[:space:]]*$/) next        # separator row
+      if ($0 ~ /^[[:space:]]*\|[-:|[:space:]]*$/) { sep_seen = 1; next }  # separator row
+      if (!sep_seen) next                                                # header row(s) above it
       n = split($0, f, "|")
       if (n >= 3 && match(f[2], /`[^`]+`/)) {
         path = substr(f[2], RSTART + 1, RLENGTH - 2)
@@ -140,18 +156,62 @@ manifest_rows() {
         print path "\t" cat
         next
       }
-      hdr = f[2]; gsub(/[[:space:]]/, "", hdr)
-      if (hdr == "File") next                                  # header row
       print "!UNPARSED\t" $0
     }
   ' "$MANIFEST"
 }
 
-# Called once; MANIFESTED, the UNPARSED check and the category classification
-# below all read from this same value so the three cannot drift against
-# each other (they previously called manifest_rows twice, normalised
+# Called once; --dump-rows, the UNPARSED check, MANIFESTED and the category
+# classification below all read from this same value so none of them can
+# drift against each other (manifest_rows previously ran twice, normalised
 # differently each time).
 ROWS="$(manifest_rows | sed 's#^\./##')"
+UNPARSED_RAW="$(printf '%s\n' "$ROWS" | grep '^!UNPARSED')"
+UNPARSED="$(printf '%s\n' "$UNPARSED_RAW" | cut -f2-)"
+
+# ---- classify the manifest rows by category --------------------------------
+# Column 2 is the FORK-LOCAL CORE PATCH / ADDITIVE distinction from affine-cm9.
+# An unrecognised value exits 2 in BOTH directions: it is a broken manifest, not
+# a policy violation, and guessing "probably additive" is how a leak ships.
+#
+# CLASSIFIED is built inside the SAME case dispatch that populates FORKLOCAL,
+# not derived from it afterwards — this is what makes --dump-rows able to
+# observe a bug in the dispatch itself (e.g. the FORK-LOCAL CORE PATCH and
+# ADDITIVE arms swapped) rather than only a bug in how the manifest was typed.
+# FORKLOCAL stays write-only here: nothing below this block reads it. It exists
+# for Task 3's outbound policy to consume; dumping rows makes no policy call.
+FORKLOCAL=""
+BADCAT=""
+CLASSIFIED=""
+while IFS=$'\t' read -r p c; do
+  [ -n "$p" ] || continue
+  case "$c" in
+    "FORK-LOCAL CORE PATCH")
+      FORKLOCAL="${FORKLOCAL}${p}"$'\n'
+      CLASSIFIED="${CLASSIFIED}${p}"$'\t'"FORK-LOCAL CORE PATCH"$'\n'
+      ;;
+    "ADDITIVE")
+      CLASSIFIED="${CLASSIFIED}${p}"$'\t'"ADDITIVE"$'\n'
+      ;;
+    *)
+      BADCAT="${BADCAT}${p}  [category: ${c:-<empty>}]"$'\n'
+      CLASSIFIED="${CLASSIFIED}${p}"$'\t'"!BADCAT(${c:-<empty>})"$'\n'
+      ;;
+  esac
+done <<< "$(printf '%s\n' "$ROWS" | grep -v '^!UNPARSED')"
+FORKLOCAL="$(printf '%s' "$FORKLOCAL" | sed '/^$/d' | sort -u)"
+
+# ---- --dump-rows: debugging aid, not a check -------------------------------
+# Prints what the parser AND the classifier saw — `path<TAB>category` per row,
+# `!UNPARSED<TAB><raw line>` for one that didn't parse — then exits before any
+# of the four checks below can fail the guard. Use it to see exactly what
+# a rejected row looked like, or to confirm a path is paired with the category
+# you think it is before trusting that pairing.
+if [ "$DUMP_ROWS" -eq 1 ]; then
+  printf '%s\n' "$UNPARSED_RAW" | sed '/^$/d'
+  printf '%s' "$CLASSIFIED"
+  exit 0
+fi
 
 # ---- check: in-section rows that should have parsed and did not -----------
 # A row missing its backticked path, or otherwise malformed, used to vanish
@@ -159,7 +219,6 @@ ROWS="$(manifest_rows | sed 's#^\./##')"
 # Inbound still caught the file as UNMANIFESTED, but outbound trusts absence
 # from FORKLOCAL as "safe to send upstream", so a silently dropped row would
 # fail OPEN there. Refuse to guess; name it and exit 2.
-UNPARSED="$(printf '%s\n' "$ROWS" | grep '^!UNPARSED' | sed 's/^!UNPARSED\t//')"
 if [ -n "$UNPARSED" ]; then
   err "manifest row(s) in $MANIFEST that could not be parsed — refusing to guess:"
   while IFS= read -r l; do [ -n "$l" ] && err "    $l"; done <<< "$UNPARSED"
@@ -175,21 +234,6 @@ if [ -z "$MANIFESTED" ]; then
   warn "the manifest table lists no files — is the '## Diverged upstream-owned files' heading intact?"
 fi
 
-# ---- classify the manifest rows by category --------------------------------
-# Column 2 is the FORK-LOCAL CORE PATCH / ADDITIVE distinction from affine-cm9.
-# An unrecognised value exits 2 in BOTH directions: it is a broken manifest, not
-# a policy violation, and guessing "probably additive" is how a leak ships.
-FORKLOCAL=""
-BADCAT=""
-while IFS=$'\t' read -r p c; do
-  [ -n "$p" ] || continue
-  case "$c" in
-    "FORK-LOCAL CORE PATCH") FORKLOCAL="${FORKLOCAL}${p}"$'\n' ;;
-    "ADDITIVE")              : ;;
-    *)                       BADCAT="${BADCAT}${p}  [category: ${c:-<empty>}]"$'\n' ;;
-  esac
-done <<< "$(printf '%s\n' "$ROWS" | grep -v '^!UNPARSED')"
-
 if [ -n "$BADCAT" ]; then
   err "manifest row(s) in $MANIFEST with an unrecognised category — refusing to guess:"
   while IFS= read -r l; do [ -n "$l" ] && err "    $l"; done <<< "$BADCAT"
@@ -198,7 +242,6 @@ if [ -n "$BADCAT" ]; then
   err "  Column 2 must read ADDITIVE or FORK-LOCAL CORE PATCH once markdown emphasis (*, _, \`) is stripped."
   exit 2
 fi
-FORKLOCAL="$(printf '%s' "$FORKLOCAL" | sed '/^$/d' | sort -u)"
 
 # ---- classify the divergence ----------------------------------------------
 # In worktree mode diff the baseline against the working tree. Untracked files
@@ -253,7 +296,7 @@ rc=0
 
 if [ -n "$UNMANIFESTED" ]; then
   rc=1
-  err "UNMANIFESTED upstream-owned divergence — add a row to scripts/woven-patch-manifest.md:"
+  err "UNMANIFESTED upstream-owned divergence — add a row to ${MANIFEST#"$REPO_ROOT/"}:"
   while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$UNMANIFESTED"
   err ""
   err "  Each row needs: | \`path\` | **ADDITIVE** or **FORK-LOCAL CORE PATCH** | why | delete when |"
@@ -265,7 +308,7 @@ fi
 
 if [ -n "$STALE" ]; then
   rc=1
-  err "STALE manifest row(s) — the path no longer exists in the tree; upstream probably deleted or renamed it:"
+  err "STALE manifest row(s) in ${MANIFEST#"$REPO_ROOT/"} — the path no longer exists in the tree; upstream probably deleted or renamed it:"
   while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$STALE"
   err "  Drop the row, or repoint it at the new path."
 fi
@@ -278,6 +321,6 @@ fi
 if [ "$rc" -eq 0 ]; then
   ok "every upstream-owned divergence is manifested, and every row resolves."
 else
-  err "manifest guard FAILED — see scripts/woven-patch-manifest.md (bead affine-hn1)."
+  err "manifest guard FAILED — see ${MANIFEST#"$REPO_ROOT/"} (bead affine-hn1)."
 fi
 exit "$rc"
