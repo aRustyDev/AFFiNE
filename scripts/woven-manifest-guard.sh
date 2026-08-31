@@ -64,6 +64,13 @@
 #
 set -uo pipefail
 
+# sort -u below dedupes by COLLATION, not by byte value. Under a UTF-8 locale
+# two byte-distinct paths can compare collation-equal and silently collapse —
+# if the dropped line were the fork-local path, outbound would fail open. This
+# makes the sorted-order invariant `comm` relies on explicit rather than
+# incidental to whatever locale happens to be set.
+export LC_ALL=C
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 2
 
@@ -174,12 +181,8 @@ UNPARSED="$(printf '%s\n' "$UNPARSED_RAW" | cut -f2-)"
 # An unrecognised value exits 2 in BOTH directions: it is a broken manifest, not
 # a policy violation, and guessing "probably additive" is how a leak ships.
 #
-# CLASSIFIED is built inside this case dispatch and is exactly what --dump-rows
-# prints. FORKLOCAL is DERIVED from CLASSIFIED below rather than built alongside
-# it — this is what makes --dump-rows able to observe a bug anywhere in this
-# block (a swapped case arm, or a divergent second read of the classification),
-# not just a bug in how the manifest was typed: the value an operator can
-# inspect and the value the guard acts on are now the same value.
+# CLASSIFIED is built here and is exactly what --dump-rows prints — see below
+# for why FORKLOCAL is derived from it rather than built alongside it.
 BADCAT=""
 CLASSIFIED=""
 while IFS=$'\t' read -r p c; do
@@ -251,10 +254,20 @@ fi
 # In worktree mode diff the baseline against the working tree. Untracked files
 # are ignored on purpose: absent from the baseline, they are fork-owned by
 # definition and so can never be an unmanifested upstream-owned change.
+#
+# --no-renames: rename detection is ON by default and --name-only then reports
+# only the DESTINATION path. Renaming a FORK-LOCAL CORE PATCH file to a new
+# name with unchanged content would make the manifested (source) path vanish
+# from this list entirely, so both the unmanifested check and the outbound
+# leak check would see nothing — a stale row is how that gets caught instead
+# (see STALE below). -c core.quotePath=false: the default quotePath=true
+# C-quotes non-ASCII paths (e.g. `pkg/café.ts` -> `"pkg/caf\303\251.ts"`), and
+# that quoted form matches nothing in the manifest or in git cat-file lookups
+# — a silent drop from both UPSTREAM_OWNED and FORKLOCAL alike.
 if [ "$WORKTREE" -eq 1 ]; then
-  CHANGED="$(git diff --name-only "$BASE_SHA" | sed '/^$/d')"
+  CHANGED="$(git -c core.quotePath=false diff --no-renames --name-only "$BASE_SHA" | sed '/^$/d')"
 else
-  CHANGED="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sed '/^$/d')"
+  CHANGED="$(git -c core.quotePath=false diff --no-renames --name-only "$BASE_SHA" "$HEAD_SHA" | sed '/^$/d')"
 fi
 UPSTREAM_OWNED=""
 while IFS= read -r p; do
@@ -275,49 +288,8 @@ log "${n_changed} changed vs baseline · ${n_upstream} upstream-owned · ${n_row
 # ---- check 1: unmanifested upstream-owned divergence -----------------------
 UNMANIFESTED="$(comm -23 <(printf '%s\n' "$UPSTREAM_OWNED" | sed '/^$/d') \
                          <(printf '%s\n' "$MANIFESTED"     | sed '/^$/d'))"
-
-# ---- OUTBOUND mode: don't leak a fork patch to upstream --------------------
-# Asks an ADDITIONAL question to the inbound one, over the same inputs: not just
-# "is this divergence declared?" but "is this change set carrying something
-# marked NEVER-upstream?".
-#
-# The unmanifested check runs FIRST and is fatal here too. FORKLOCAL is derived
-# from the manifest, so a row the parser cannot read silently leaves the set, and
-# an empty set looks exactly like "nothing to leak". An unreadable row makes its
-# file unmanifested, so gating on that makes every parser gap fail closed —
-# including shapes nobody anticipated. It also means the two checks can never
-# disagree: a branch cannot be "safe to send upstream" while carrying a
-# divergence the fork has not declared.
-#
-# LEAKED is compared against CHANGED rather than UPSTREAM_OWNED because that is
-# the honest question — though a FORK-LOCAL row is upstream-owned by
-# construction, so in practice the two agree.
-if [ "$OUTBOUND" -eq 1 ]; then
-  if [ -n "$UNMANIFESTED" ]; then
-    err "cannot judge this change set: upstream-owned file(s) with no manifest row:"
-    while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$UNMANIFESTED"
-    err ""
-    err "  An undeclared divergence has no category, so it cannot be cleared for"
-    err "  upstream. Add a row to ${MANIFEST#"$REPO_ROOT/"} — or revert the change."
-    exit 1
-  fi
-  LEAKED="$(comm -12 <(printf '%s\n' "$CHANGED"   | sed 's#^\./##' | sed '/^$/d' | sort -u) \
-                     <(printf '%s\n' "$FORKLOCAL" | sed '/^$/d' | sort -u))"
-  if [ -n "$LEAKED" ]; then
-    err "FORK-LOCAL CORE PATCH on an upstream-directed change set:"
-    while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$LEAKED"
-    err ""
-    err "  These files change upstream behaviour and must NEVER reach upstream (affine-cm9)."
-    err "  This branch is not safe to send to the upstream repository."
-    err "  Start an upstream-bound branch from the upstream baseline instead:"
-    err "    scripts/woven-upstream-branch.sh <name> <path>..."
-    err "  There is no override. If a category is genuinely wrong, change the"
-    err "  manifest row in a reviewed commit."
-    exit 1
-  fi
-  ok "no FORK-LOCAL CORE PATCH in this change set — safe to send upstream."
-  exit 0
-fi
+comm_rc=$?
+[ "$comm_rc" -eq 0 ] || die "comm failed while computing UNMANIFESTED (exit $comm_rc) — an environment error, not a policy determination; refusing to report a possibly-wrong result."
 
 # ---- check 2: rows whose path is gone from the tree ------------------------
 STALE=""
@@ -337,6 +309,65 @@ while IFS= read -r p; do
     UNDIVERGED="${UNDIVERGED}${p}"$'\n'
   fi
 done <<< "$MANIFESTED"
+
+# ---- OUTBOUND mode: don't leak a fork patch to upstream --------------------
+# Asks an ADDITIONAL question to the inbound one, over the same inputs: not just
+# "is this divergence declared?" but "is this change set carrying something
+# marked NEVER-upstream?". Runs after BOTH inbound checks — UNMANIFESTED and
+# STALE — rather than just the first: outbound requires the branch to be
+# INBOUND-CLEAN, not merely unmanifested-clean. A stale row's category no
+# longer describes this tree either — for example a rename (CHANGED above is
+# taken with --no-renames precisely so a rename cannot hide the old path from
+# this diff) leaves the manifested path absent from the tree, and the row's
+# classification becomes unverifiable — the same "absence is ambiguous" shape
+# the unmanifested check exists to close on the other side.
+#
+# FORKLOCAL is derived from the manifest, so a row the parser cannot read
+# silently leaves the set, and an empty set looks exactly like "nothing to
+# leak". An unreadable or stale row makes gating here fail closed by
+# construction rather than by having been anticipated. It also means the
+# checks can never disagree: a branch cannot be "safe to send upstream" while
+# carrying a divergence the fork has not declared, or a row whose meaning this
+# tree can no longer confirm.
+if [ "$OUTBOUND" -eq 1 ]; then
+  if [ -n "$UNMANIFESTED" ] || [ -n "$STALE" ]; then
+    if [ -n "$UNMANIFESTED" ]; then
+      err "cannot judge this change set: upstream-owned file(s) with no manifest row:"
+      while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$UNMANIFESTED"
+      err ""
+      err "  An undeclared divergence has no category, so it cannot be cleared for"
+      err "  upstream. Add a row to ${MANIFEST#"$REPO_ROOT/"} — or revert the change."
+    fi
+    if [ -n "$STALE" ]; then
+      err "cannot judge this change set: manifest row(s) whose path no longer exists in the tree:"
+      while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$STALE"
+      err ""
+      err "  A stale row's category no longer describes this tree — the file may have"
+      err "  been renamed (a rename would otherwise hide the old path from this diff)"
+      err "  or deleted. Update or drop the row in ${MANIFEST#"$REPO_ROOT/"} before this"
+      err "  branch can be judged safe for upstream."
+    fi
+    exit 1
+  fi
+  LEAKED="$(comm -12 <(printf '%s\n' "$CHANGED"   | sed '/^$/d' | sort -u) \
+                     <(printf '%s\n' "$FORKLOCAL" | sed '/^$/d' | sort -u))"
+  comm_rc=$?
+  [ "$comm_rc" -eq 0 ] || die "comm failed while computing LEAKED (exit $comm_rc) — an environment error, not a policy determination; refusing to report a possibly-wrong result."
+  if [ -n "$LEAKED" ]; then
+    err "FORK-LOCAL CORE PATCH on an upstream-directed change set:"
+    while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$LEAKED"
+    err ""
+    err "  These files change upstream behaviour and must NEVER reach upstream (affine-cm9)."
+    err "  This branch is not safe to send to the upstream repository."
+    err "  Start an upstream-bound branch from the upstream baseline instead:"
+    err "    scripts/woven-upstream-branch.sh <name> <path>..."
+    err "  There is no override. If a category is genuinely wrong, change the"
+    err "  manifest row in a reviewed commit."
+    exit 1
+  fi
+  ok "no FORK-LOCAL CORE PATCH in this change set — safe to send upstream."
+  exit 0
+fi
 
 # ---- report ----------------------------------------------------------------
 rc=0

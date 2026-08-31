@@ -216,7 +216,7 @@ else
   dump
 fi
 
-# --- 9. the leak: a branch off woven/main carries the core auth patch --------
+# --- 13. the leak: a branch off woven/main carries the core auth patch -------
 # HEAD descends from woven/main, so oidc.ts diverges from the baseline. That is
 # exactly the branch someone would cut to upstream a small additive fix.
 echo "-- outbound: HEAD carries a FORK-LOCAL CORE PATCH"
@@ -224,22 +224,75 @@ run_guard --outbound --head HEAD
 expect_rc 1 "policy violation"
 expect_names "$OIDC_PATH"
 
-# --- 10. ADDITIVE rows must NOT trip it --------------------------------------
+# --- 14. ADDITIVE rows must NOT trip it --------------------------------------
 # The fixture that catches a parser reading the wrong column: seed/index.ts and
 # build-test.yml also diverge from the baseline, and both are ADDITIVE.
 echo "-- outbound: ADDITIVE divergence is not a leak"
 grep -qF -- "$SEED_PATH" "$OUT" && bad "outbound named an ADDITIVE file: $SEED_PATH" || ok "ADDITIVE $SEED_PATH not named"
 grep -qF -- ".github/workflows/build-test.yml" "$OUT" && bad "outbound named an ADDITIVE file: build-test.yml" || ok "ADDITIVE build-test.yml not named"
 
-# --- 9b. outbound refuses to judge an undeclared divergence ------------------
+# --- 15. outbound refuses to judge an undeclared divergence ------------------
 # Not a duplicate of the inbound unmanifested fixture: it pins the ORDERING.
-# If outbound consulted FORKLOCAL first, a manifest row that failed to parse
-# would drop its file out of the set and the leak check would pass vacuously.
+# Deleting oidc.ts's OWN row empties FORKLOCAL along with UNMANIFESTED's
+# counterpart, so this covers the empty-FORKLOCAL case: if outbound consulted
+# FORKLOCAL first, a manifest row that failed to parse would drop its file out
+# of the set and the leak check would pass vacuously.
 echo "-- outbound: an unmanifested upstream-owned file is not judgeable"
 grep -v -- "providers/oidc.ts" "$MANIFEST" >"$TMPDIR_T/m-nooidc.md"
 run_guard --outbound --manifest "$TMPDIR_T/m-nooidc.md" --head HEAD
 expect_rc 1 "policy violation"
 expect_names "$OIDC_PATH"
+
+# --- 15b. ordering, with a REAL leak also present ----------------------------
+# 15 alone doesn't pin which check runs FIRST: with oidc.ts's own row gone,
+# FORKLOCAL is empty too, so a guard that consulted the leak check before the
+# unmanifested one would also see nothing there and still exit 1 — for the
+# wrong reason. This fixture removes the ADDITIVE seed/index.ts row instead,
+# leaving oidc.ts's FORK-LOCAL row intact, so UNMANIFESTED (seed) and LEAKED
+# (oidc) are BOTH non-empty at once. Asserting the "cannot judge" message names
+# seed/index.ts, and that the leak message never appears, pins that the
+# unmanifested gate ran — and returned — before the leak check could.
+echo "-- outbound: an unmanifested file blocks judgement even with a real leak present"
+grep -v -- "src/seed/index.ts" "$MANIFEST" >"$TMPDIR_T/m-noseed.md"
+run_guard --outbound --manifest "$TMPDIR_T/m-noseed.md" --head HEAD
+expect_rc 1 "policy violation"
+expect_names "$SEED_PATH"
+if grep -qF -- "FORK-LOCAL CORE PATCH on an upstream-directed change set" "$OUT"; then
+  bad "outbound reported the leak message instead of refusing to judge — ordering broke"
+else
+  ok "outbound refused to judge before ever reaching the leak check"
+fi
+
+# --- 16. a rename hides the fork-local path from a default diff -------------
+# git diff has rename detection ON by default and --name-only reports only the
+# DESTINATION path. Renaming oidc.ts (FORK-LOCAL CORE PATCH) to a new path with
+# byte-identical, already-diverged content used to make the manifested path
+# vanish from CHANGED entirely: comm -12 found nothing, and the guard printed
+# "no FORK-LOCAL CORE PATCH ... safe to send upstream" while the patch was
+# fully present on the branch under a new name. Built with plumbing against a
+# scratch index seeded from HEAD, so no branch, index or working tree is
+# touched.
+echo "-- outbound: a rename hides the fork-local path from a default diff"
+RENAME_PATH="packages/backend/server/src/plugins/oauth/providers/oidc-provider.ts"
+rn_index="$TMPDIR_T/index.rename"
+oidc_entry="$(git ls-tree HEAD -- "$OIDC_PATH")"
+oidc_mode="$(printf '%s' "$oidc_entry" | awk '{print $1}')"
+oidc_blob="$(printf '%s' "$oidc_entry" | awk '{print $3}')"
+GIT_INDEX_FILE="$rn_index" git read-tree HEAD
+GIT_INDEX_FILE="$rn_index" git update-index --force-remove "$OIDC_PATH"
+GIT_INDEX_FILE="$rn_index" git update-index --add --cacheinfo "${oidc_mode},${oidc_blob},${RENAME_PATH}"
+rn_tree="$(GIT_INDEX_FILE="$rn_index" git write-tree)"
+RN_REF="$(GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
+          GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
+          git commit-tree "$rn_tree" -p HEAD -m 'outbound rename fixture: oidc.ts -> oidc-provider.ts, identical content')"
+
+if [ -z "$RN_REF" ]; then
+  bad "could not build the rename fixture commit"
+else
+  run_guard --outbound --head "$RN_REF"
+  expect_rc 1 "not clean -- either a leak or a refusal to judge a stale row"
+  expect_names "$OIDC_PATH"
+fi
 
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
