@@ -69,10 +69,19 @@ Append to `scripts/woven-manifest-guard.test.sh`, immediately before the final `
 echo "== woven-manifest-guard OUTBOUND fixtures =="
 
 # --- 7. the flag exists ------------------------------------------------------
+# Asserts the flag is ACCEPTED — not a usage error — rather than asserting a
+# specific clean/violation result. Task 3 makes `--outbound --head HEAD` exit 1,
+# because HEAD descends from woven/main and carries oidc.ts. A fixture asserting
+# rc 0 here would have to be inverted then, and a green "outbound says clean on
+# woven/main" is exactly the pressure that produces the mistake this plan's notes
+# warn against. Phrased this way it survives task 3 untouched.
 echo "-- outbound: --outbound is accepted"
 run_guard --outbound --head HEAD
-expect_rc 0 "clean"
+if [ "$RC" -ne 2 ]; then ok "--outbound accepted (exit $RC, not a usage error)"
+else bad "--outbound rejected as a usage error"; dump; fi
 ```
+
+Inline `if` / `ok` / `bad` is this file's existing idiom for assertions `expect_rc` does not cover — see the worktree-victim fixture and the `FIXTURE_REF` guard.
 
 - [ ] **Step 3: Run it to verify it fails**
 
@@ -108,23 +117,24 @@ In the comment block at the top of the file, replace the `# Usage:` line and the
 # row says FORK-LOCAL CORE PATCH — don't leak a fork patch to upstream.
 ```
 
-- [ ] **Step 6: Fix the `--help` line range**
+- [ ] **Step 6: Stop the `--help` range from being a hardcoded line number**
 
-`-h|--help` runs `sed -n '2,37p' "${BASH_SOURCE[0]}"`. Step 5 made the header longer, so that range now truncates it.
+`-h|--help` runs `sed -n '2,37p' "${BASH_SOURCE[0]}"`. Step 5 made the header longer, so that range now truncates the output mid-sentence.
 
-Find the last line of the header comment block:
+Do not just bump the number. It is a hardcoded line count that silently truncates whenever the header changes length, it has now been wrong once, and Task 6 would copy the idiom into a new script. Derive the end of the comment block instead:
 
 ```bash
-grep -n '^set -uo pipefail' scripts/woven-manifest-guard.sh
+    -h|--help)  awk 'NR>1 && !/^#/{exit} NR>1' "${BASH_SOURCE[0]}"; exit 0 ;;
 ```
 
-Subtract 2 (the blank `#` line and the `set` line) and put that number in the `sed` range. Then verify:
+`awk` is already used by `manifest_rows()`, so this adds no dependency. Verify:
 
 ```bash
+scripts/woven-manifest-guard.sh --help | head -2
 scripts/woven-manifest-guard.sh --help | tail -3
 ```
 
-Expected: the last lines of the header comment, ending with the `fetch-depth: 0` note — not cut off mid-sentence.
+Expected: starts at the line after the shebang, and ends with the `fetch-depth: 0` note — not cut off mid-sentence.
 
 - [ ] **Step 7: Run the suite**
 
@@ -643,7 +653,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --from)      [ $# -ge 2 ] || die "--from needs a ref"; FROM="$2"; shift 2 ;;
     --no-switch) SWITCH=0; shift ;;
-    -h|--help)   sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help)   awk 'NR>1 && !/^#/{exit} NR>1' "${BASH_SOURCE[0]}"; exit 0 ;;
     -*)          die "unknown argument: $1" ;;
     *)           NAME="$1"; shift; break ;;
   esac
