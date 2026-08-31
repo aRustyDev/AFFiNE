@@ -1,0 +1,264 @@
+# Upstream leak guard — design
+
+Bead: **affine-hn1.4** · epic **affine-hn1** · strategy **affine-cm9**
+Date: 2026-08-31 · Status: approved, pending implementation plan
+
+## Problem
+
+`affine-cm9` splits fork changes into two categories: **ADDITIVE** (rebase-safe,
+sometimes upstreamable) and **FORK-LOCAL CORE PATCH** (changes upstream
+behaviour; never upstreamed). It requires that CI "block them from
+upstream-directed branches/PRs". That has never been built.
+
+`affine-hn1.2` built the inbound half — `scripts/woven-manifest-guard.sh` fails
+when an upstream-owned file diverges with no manifest row, so a fork patch
+cannot be silently lost to the next upstream merge. This bead is the outbound
+half: a fork patch must not reach upstream.
+
+The manifest table already carries the category in column 2, and
+`manifest_rows()` already isolates that table and extracts column 1. Nothing
+reads the category. This design makes it load-bearing.
+
+### The failure this prevents
+
+Not "pushing to upstream by accident" in general. Specifically: **the day the
+fork deliberately contributes something upstream and a fork-local patch rides
+along in the branch.**
+
+The fork intends to upstream generic fixes — that is the point of the ADDITIVE
+category, and the manifest already nominates a candidate. Of
+`.github/workflows/build-test.yml` it says the added `workflow_dispatch` is
+"low-conflict on future merges and is a plausible upstream contribution".
+
+Sending that upstream means branching. Branch from `woven/main`, as anyone
+would, and the branch also carries
+`packages/backend/server/src/plugins/oauth/providers/oidc.ts` — a core auth
+patch naming an internal issuer (`id.auth.woven`) and an org-CA trust
+arrangement. Opening that PR publishes both, publicly, to a project the fork is
+a guest in.
+
+This is not a tooling misconfiguration. It is the ordinary shape of forking: the
+working branch descends from everything the fork has ever patched.
+
+### Why now
+
+Two reasons.
+
+1. **The near-miss was real.** `gh pr create` defaulted to the parent repo. The
+   `affine-hn1.2` PR failed to reach upstream only because `woven/main` does not
+   exist there (`Base ref must be a branch`). The fork's `origin` also carries
+   upstream's branch names — `origin/canary` among them — so a PR based on a
+   shared name would have gone through. `gh repo set-default aRustyDev/AFFiNE`
+   (set 2026-08-31) closes that specific hole, but it is per-clone git config: a
+   fresh clone on another machine starts unprotected.
+2. **`affine-vap` is unblocked.** Removing the self-hosted member/seat limit will
+   add the second and most sensitive FORK-LOCAL CORE PATCH. The guard should
+   exist before that patch does.
+
+## Constraint that shapes the design
+
+**A workflow in this fork cannot gate a PR into `toeverything/AFFiNE`.** For
+`pull_request` events GitHub runs workflows from the _base_ repository. A PR
+into upstream runs upstream's workflows; `woven-manifest-guard.yml` does not
+exist there and never executes.
+
+Consequences:
+
+- Blocking at the upstream PR is unreachable. Enforcement must fire strictly
+  earlier.
+- "The PR's base repo is upstream" — the most robust signal, and the one the
+  bead speculated about — is unavailable to CI. It is available to a local
+  pre-push hook, which sees the destination URL directly.
+
+A related note in the `hn1.2` workflow ("a push-triggered guard would never fire
+on this fork") describes **upstream's** `build-test.yml`, whose `push:` list
+covers only `canary`/`beta`/`stable`/`v*.x`. A new fork-owned workflow may
+declare any `push:` branches it likes and fires normally. A push trigger is
+available to this design.
+
+## Decision: three layers over one engine
+
+| Layer           | Mechanism                                         | Catches                                                 | Fails when                               |
+| --------------- | ------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------- |
+| 1. Prevention   | `scripts/woven-upstream-branch.sh`                | the branch never contains a fork-local patch            | the branch is made by hand instead       |
+| 2. Interception | `.husky/pre-push`                                 | any push whose destination is upstream, any branch name | `--no-verify`, or husky not bootstrapped |
+| 3. Backstop     | `woven-manifest-guard.yml`, push to `upstream/**` | the machine where the hook is dormant                   | the branch prefix is not used            |
+
+Each layer covers the previous layer's failure mode. All three call the same
+engine, so there is one definition of "is this a leak".
+
+## The engine — `woven-manifest-guard.sh --outbound`
+
+### Parser change
+
+`manifest_rows()` currently emits the backticked path from column 1 of the
+`## Diverged upstream-owned files` table. It changes to emit `path<TAB>category`;
+the existing inbound consumer takes field 1. One parser, one section-scoping
+rule, no second copy — per `affine-tpb`, adopt existing seams rather than
+rebuild.
+
+Category strings arrive markdown-emphasised (`**FORK-LOCAL CORE PATCH**`).
+Normalisation strips emphasis characters and surrounding whitespace before
+comparison.
+
+### The new check
+
+|          | inbound (existing)                                            | outbound (new)                                                              |
+| -------- | ------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Question | does an upstream-owned file diverge with **no** manifest row? | does this change set touch a file whose row says **FORK-LOCAL CORE PATCH**? |
+| Base     | `UPSTREAM_COMMIT` from `scripts/woven-upstream-baseline`      | same                                                                        |
+| Head     | `HEAD` or `--head REF`                                        | same                                                                        |
+| Exit     | 0 clean / 1 violation / 2 environment                         | same                                                                        |
+
+Using the same baseline in both directions is what makes this cheap. A branch
+built from `UPSTREAM_COMMIT` shows only what it adds — clean. A branch built
+from `woven/main` shows `oidc.ts` as diverged, which is the violation.
+
+Output names every offending path, so the fix is mechanical.
+
+### Fail closed
+
+A manifest row whose category is neither recognisably `FORK-LOCAL CORE PATCH`
+nor `ADDITIVE` exits **2**. It is never treated as ADDITIVE by default. A typo
+in the manifest must not silently open the gate; this is the one place a parsing
+bug would be both invisible and catastrophic.
+
+### No override
+
+The inbound guard downgrades harmless staleness to a warning. The outbound guard
+has no escape hatch: exit 1 is final. "Never upstream" is the entire rule. A
+legitimate change of category is an edit to the manifest in a reviewed commit,
+not a runtime flag.
+
+## Layer 1 — `scripts/woven-upstream-branch.sh`
+
+Creates an upstream-bound branch **from `UPSTREAM_COMMIT`**, not from
+`woven/main`, and carries over only the files named on the command line. The
+resulting branch cannot contain a fork-local patch because it never descended
+from anything carrying one — prevention by construction rather than detection
+after the fact.
+
+Behaviour:
+
+- Names the branch `upstream/<name>`. This is what makes layer 3's convention
+  reliable: the prefix CI keys on becomes a byproduct of using the tool rather
+  than something a person must remember.
+- Refuses, before creating anything, if a named file's manifest row says
+  FORK-LOCAL CORE PATCH.
+- Runs `--outbound` against the finished branch and reports the result, so the
+  tool proves its own output rather than asserting it.
+- Refuses to run on a dirty tree, consistent with the rest of the `woven-*`
+  scripts.
+
+## Layer 2 — `.husky/pre-push`
+
+Pre-push receives the remote name and URL on argv. If the destination URL
+identifies the upstream repository, the hook runs the guard and refuses the push
+on exit 1.
+
+Two decisions:
+
+- **Match on the destination URL, not the remote's name.** A remote called
+  `upstream` proves nothing, and a second remote pointing at the same place
+  would bypass a name check. The upstream identity is currently recorded nowhere
+  — `scripts/woven-upstream-baseline` pins the commit and tag, not the
+  repository — so this design adds `UPSTREAM_REPO=toeverything/AFFiNE` to that
+  file. The identity then has one home, consistent with how the baseline commit
+  is already treated.
+- **Guard the branch tip against the baseline, not the pushed range.** Pre-push
+  supplies `<local ref> <local sha> <remote ref> <remote sha>` on stdin, and
+  `remote sha` is all-zeros for a branch the remote has not seen. Comparing the
+  tip to `UPSTREAM_COMMIT` is the comparison the engine already makes and avoids
+  that edge case entirely.
+
+The hook is a seatbelt, not a lock: `--no-verify` walks past it. That is
+accepted, and is why layer 3 exists.
+
+## Layer 3 — `woven-manifest-guard.yml`
+
+Extend the existing workflow rather than add a second one. It already runs both
+fixture suites; two workflows running overlapping fixtures would drift.
+
+- Existing trigger, unchanged: `pull_request:` into `woven/main` → inbound guard.
+- New trigger: `push:` to `upstream/**` → outbound guard.
+- `fetch-depth: 0` is required for both, for the same reason: the baseline is
+  reachable only as a merge parent, and a shallow checkout cannot resolve it.
+
+CI keys on the branch prefix because it has no other signal available — see the
+constraint above. The prefix is weak on its own (it can be forgotten) and is
+backed by layers 1 and 2.
+
+## Testing
+
+Fixtures follow the established style: derived from real fork history rather
+than synthesised, built with `git commit-tree` plumbing so they never touch the
+working tree or the branch, with `GIT_AUTHOR_*` / `GIT_COMMITTER_*` set
+explicitly — a runner has no git identity, and the omission previously surfaced
+as a confusing exit 2 rather than a test failure.
+
+Added to `scripts/woven-manifest-guard.test.sh`:
+
+- **Known-good outbound** — a branch from the baseline carrying only
+  `build-test.yml` (the manifest's own nominated upstream candidate) → exit 0.
+- **The leak** — a branch at `woven/main`'s tip → exit 1, naming `oidc.ts`.
+- **Category discrimination** — `seed/index.ts` and `build-test.yml` are
+  ADDITIVE and must not trip the guard; only the FORK-LOCAL row does. This is
+  the fixture that catches a parser reading the wrong column.
+- **Fail closed** — a row with an unrecognised category → exit 2.
+- **Inbound unchanged** — the existing 13 assertions must still pass, proving
+  the shared parser change did not alter inbound behaviour.
+
+New `scripts/woven-upstream-branch.test.sh`:
+
+- A prepared branch passes `--outbound`.
+- The branch is named `upstream/**`.
+- Naming a FORK-LOCAL file is refused before the branch is created.
+
+New hook coverage: invoke `.husky/pre-push` directly with a synthetic upstream
+URL (must fail) and a synthetic fork URL (must pass), asserting both directions
+without performing a real push.
+
+## Risks and open items
+
+**Husky is dormant in worktrees.** `core.hooksPath` is `.husky/_`, which husky
+creates during `yarn install` and which is gitignored, so it does not exist in a
+fresh worktree. `git config --show-origin` puts `core.hooksPath` in the shared
+`.git/config`; the existing `WorktreeCreate`/`SessionStart` hook in
+`.claude/settings.local.json` runs `git config --worktree --unset
+core.hooksPath`, which clears only a worktree-scoped value and so has nothing to
+remove. `extensions.worktreeConfig` is `true`, so the mechanism is available.
+Layer 2 is therefore inert until a checkout has run `yarn install` under the
+`affine` micromamba environment. This is a known limitation covered by layer 3,
+not a blocker for this bead; the hook configuration itself is out of scope here.
+
+**Layer 3 depends on a naming convention.** If an upstream-bound branch is made
+by hand without the `upstream/` prefix, CI does not fire. Layer 2 covers this
+when installed; layer 1 makes the prefix automatic when used.
+
+**The guard is only as good as the category column.** `affine-vap` must land its
+row marked `FORK-LOCAL CORE PATCH`. The inbound guard already forces a row to
+exist; this design is what gives the category teeth. Record this on `affine-vap`
+so its implementer knows.
+
+## Out of scope
+
+- Changing how `gh` resolves the default repository. Already addressed by
+  `gh repo set-default`.
+- Any check running in upstream's Actions context. Not reachable.
+- Repairing the worktree hooks configuration.
+- Adding or recategorising manifest rows. This design reads the column; it does
+  not curate it.
+
+## Success criteria
+
+1. `woven-manifest-guard.sh --outbound` exits 1 and names the file when a change
+   set touches a FORK-LOCAL CORE PATCH, 0 when it does not, and 2 when a
+   category cannot be parsed.
+2. The existing inbound assertions still pass unchanged.
+3. `woven-upstream-branch.sh` produces a branch that passes `--outbound`, named
+   `upstream/**`.
+4. `.husky/pre-push` refuses a push whose destination is `UPSTREAM_REPO` and a
+   branch carrying a fork-local patch, and permits one whose destination is the
+   fork.
+5. The guard workflow runs the outbound check on push to `upstream/**` and the
+   inbound check on PRs into `woven/main`, both with `fetch-depth: 0`.
