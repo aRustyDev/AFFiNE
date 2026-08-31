@@ -118,23 +118,53 @@ Output names every offending path, so the fix is mechanical.
 
 ### Outbound is an ADDITIONAL question, not a separate one
 
-Outbound runs the inbound unmanifested check **first**, and only consults the
-FORK-LOCAL list if that passes. This is a correctness requirement, not tidiness.
+**Outbound requires the branch to be inbound-clean first, and only then consults
+the FORK-LOCAL list.** This is a correctness requirement, not tidiness.
 
-The outbound answer is derived from the manifest, so a row the parser fails to
-read silently removes its file from the FORK-LOCAL set — and an empty set is
-indistinguishable from "nothing to leak". Markdown offers more ways to write a
-row than a parser can be trusted to cover (a missing leading pipe, which GFM
-permits; a `#`-prefixed line appearing mid-table; an escaped `\|` in a cell), so
-hardening the parser shape-by-shape is a losing game.
+The outbound answer is derived entirely from the manifest, so anything that
+quietly breaks the correspondence between a manifest row and the tree removes a
+file from the FORK-LOCAL set — and an empty set is indistinguishable from
+"nothing to leak". That correspondence has more failure modes than can be
+enumerated:
 
-Requiring every upstream-owned change to be manifested first closes the whole
-class at once: a row that fails to parse makes its file **unmanifested**, which
-is already a failure. Any future parser gap therefore fails closed by
-construction rather than by having been anticipated.
+- **The row will not parse.** Markdown permits more row shapes than a parser can
+  be trusted to cover — a missing leading pipe, a `#`-prefixed line mid-table, an
+  escaped `\|` in a cell.
+- **The row's path no longer exists in the tree.** Renaming a fork-local file
+  makes the manifested path stale, and `git diff` reports only the destination,
+  so the patch is fully present under a name the manifest does not mention. This
+  one is not hypothetical: it was demonstrated producing "safe to send upstream"
+  on a branch carrying the whole OIDC patch.
 
-This also means the two checks cannot disagree. A branch cannot be "clean to
-send upstream" while carrying a divergence the fork has not declared.
+Both are already inbound failures — the first as UNMANIFESTED, the second as a
+STALE row. So the fix is not to enumerate the failure modes but to refuse to
+answer the outbound question at all unless the inbound checks pass. Any future
+way of breaking the row-to-tree correspondence then fails closed by
+construction, whether or not anyone anticipated it.
+
+This also means the two checks cannot disagree. A branch cannot be "clean to send
+upstream" while carrying a divergence the fork has not declared, or a declaration
+that no longer describes the tree.
+
+`UNDIVERGED` rows stay a warning: a row for a file that no longer differs from
+upstream is harmless, and is the one mismatch that cannot hide a patch.
+
+### Paths must be compared as literal bytes
+
+Two `git diff` defaults corrupt the comparison, and both fail open:
+
+- **Rename detection** collapses a rename to the destination path, hiding the
+  manifested source. Use `--no-renames`.
+- **`core.quotePath`** C-quotes non-ASCII paths, so `pkg/café.ts` arrives as
+  `pkg/caf\303\251.ts` — matching neither the manifest nor `git cat-file`, which
+  drops it out of the upstream-owned set too, defeating the inbound backstop as
+  well. Use `-c core.quotePath=false`.
+
+For the same reason the guard pins `LC_ALL=C`: `sort -u` deduplicates by
+collation, so under a UTF-8 locale two byte-distinct paths that compare equal
+collapse into one — and if the dropped line is the fork-local path, outbound
+fails open. It also makes the sorted-order invariant `comm` depends on explicit
+rather than incidental.
 
 ### Fail closed
 
