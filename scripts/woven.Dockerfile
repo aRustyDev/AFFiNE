@@ -5,12 +5,10 @@
 # packaging-only Dockerfile (.github/deployment/node/Dockerfile), which expects
 # prebuilt dist + node_modules and a per-arch server-native .node produced by CI.
 #
-# BUILT BY CI, NOT LOCALLY. .github/workflows/woven-publish-image.yml is the only
-# consumer: on push to woven/main (and on workflow_dispatch) it builds this file
-# for linux/amd64 and pushes ghcr.io/${owner}/affine:woven-<sha> plus the floating
-# :woven. The infrastructure repo pins the resulting DIGEST. The former local
-# builder (scripts/woven-build-image.sh, which forced linux/arm64) was removed
-# with the local-compose CD path on 2026-08-31 — see affine-yiz.
+# BUILT BY CI ONLY. .github/workflows/woven-publish-image.yml is the sole
+# consumer: it builds this file for linux/amd64 and pushes
+# ghcr.io/${owner}/affine:woven-<sha> plus the floating :woven. The
+# infrastructure repo pins the resulting DIGEST. There is no local build path.
 #
 # NOTE: this from-source build is heavy (10-30 min, >=8 GB RAM, network).
 ARG NODE_IMAGE=node:22-bookworm-slim

@@ -64,17 +64,9 @@ export DATABASE_URL="${DATABASE_URL:-postgresql://affine:affine@localhost:5432/a
 export REDIS_SERVER_HOST="${REDIS_SERVER_HOST:-localhost}"
 export AFFINE_INDEXER_ENABLED="${AFFINE_INDEXER_ENABLED:-false}"
 
-# ---- SAFETY GUARD: never point the truncating test DB at a non-disposable DB --
-# Server tests TRUNCATE. The defence is the host assertion below: the DB must be
-# on localhost, and WOVEN_CI_FORCE is the only way past it.
-#
-# This used to ALSO resolve a live deployment by identity (the container
-# publishing :3010 -> its compose project + postgres) via woven-resolve-live.sh
-# and refuse if DATABASE_URL targeted it (bead affine-4yo.7). That check went with
-# the local-compose CD path (affine-yiz, closed superseded 2026-08-31): the fork
-# is deployed to k3s from GHCR by the infrastructure repo, so there is no
-# co-located live stack to discover and the check could only report "nothing to
-# protect". A remote live DB is still caught by the host assertion.
+# ---- SAFETY GUARD: never point the truncating test DB at a real database -----
+# Server tests TRUNCATE. DATABASE_URL must resolve to a localhost host; anything
+# else is refused unless WOVEN_CI_FORCE=1.
 assert_disposable_db() {
   local url="$DATABASE_URL"
   local noproto="${url#*://}"          # user:pass@host:port/db?args

@@ -54,12 +54,7 @@ throwaway DB.
 - 🚨 **Server tests `TRUNCATE` the database.** Only ever point `DATABASE_URL` at
   the disposable stack (`localhost:5432`). `scripts/woven-ci-min.sh` enforces
   that the host is local and refuses anything else (override:
-  `WOVEN_CI_FORCE=1`). Historically this repo also ran a co-located `woven-local`
-  compose stack whose live Postgres sat on `127.0.0.1:5433`, and the gate
-  resolved and blocked it by identity (bead `affine-4yo.7`); that stack and its
-  resolver went with the local-compose CD path (`affine-yiz`, closed superseded
-  2026-08-31). The database now lives in the k3s cluster and is not reachable
-  from a dev machine by default. Keep the habit regardless.
+  `WOVEN_CI_FORCE=1`).
 
 Standard environment for any test/gate/DB command:
 
@@ -190,12 +185,3 @@ there is no "database is newer than me, refuse to start" guard and no
 down-migration path. Require a **verified-restorable** backup before deploying
 across one. Backup/restore is a cluster-side (CNPG) concern; see
 `docs/src/operations/affine-pg-restore-drill.md` in the infrastructure repo.
-
-> History: a local-compose CD toolchain (`woven-promote.sh` stage/prod/rollback,
-> `woven-build-image.sh`, `woven-backup.sh`/`woven-restore.sh`,
-> `woven-migration-rehearsal.sh`, `woven-resolve-live.sh`, `woven-cd-runbook.md`)
-> lived in `scripts/` and targeted a `woven-local` docker stack on one operator's
-> machine. It was never used for a production cutover and was removed on
-> 2026-08-31 with `affine-yiz`. `git log -- scripts/woven-promote.sh` has it if
-> you need the prior art — but note `woven-build-image.sh` hard-asserted
-> `linux/arm64`, while the CI image is `amd64`.
