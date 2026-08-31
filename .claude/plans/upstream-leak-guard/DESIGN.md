@@ -197,8 +197,13 @@ Behaviour:
   FORK-LOCAL CORE PATCH.
 - Runs `--outbound` against the finished branch and reports the result, so the
   tool proves its own output rather than asserting it.
-- Refuses to run on a dirty tree, consistent with the rest of the `woven-*`
-  scripts.
+- Refuses to run on a dirty tree. This is **not** the convention elsewhere in the
+  `woven-*` scripts — the guard deliberately folds uncommitted work in, on the
+  grounds that a check which only ever sees `HEAD` reports "clean" on the very
+  change you are about to push. The preparer is the opposite case: it takes file
+  contents from a **ref**, so an uncommitted edit would silently not be carried
+  and the branch would not contain what the operator just looked at. Refusing is
+  the honest response to that, not a house style.
 
 **The branch is a starting point, not a finished contribution.** The developer
 reviews and adjusts it before pushing — cherry-picking further commits, editing
