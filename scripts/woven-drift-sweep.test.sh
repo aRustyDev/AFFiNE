@@ -72,8 +72,8 @@ echo "-- the three drift classes are named in the output"
 expect_names "SATISFIED" "INVALIDATED" "INCIDENTAL"
 
 # --- 4b. the report is not garbled by stray carriage returns ----------------
-# jq ships CRLF on Git-for-Windows; an unstripped \r returns the cursor
-# mid-line, so a candidate silently overwrites the one above it.
+# Some jq builds emit CRLF; an unstripped \r returns the cursor mid-line, so a
+# candidate silently overwrites the one above it.
 echo "-- report carries no stray CR"
 if grep -q $'\r' "$OUT"; then bad "output contains a carriage return"; dump; else ok "no CR in output"; fi
 

@@ -112,8 +112,8 @@ run_guard --base 0000000000000000000000000000000000000000
 expect_rc 2 "environment error"
 
 # --- 6. a REAL unmanifested edit, on a throwaway commit ----------------------
-# Uses a temp branch + --no-verify (the repo's husky pre-commit hook is not
-# executable under Git-for-Windows) and never touches the checked-out branch.
+# Built with plumbing against a scratch index, so no branch, index or working
+# tree is touched and no hooks run.
 echo "-- live edit: real commit touching an unmanifested upstream-owned file"
 VICTIM="packages/backend/server/src/base/error/def.ts"
 base_ref="$(git rev-parse HEAD)"

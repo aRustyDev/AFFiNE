@@ -63,9 +63,8 @@ done
 
 command -v jq >/dev/null 2>&1 || die "jq is required"
 
-# jq ships CRLF line endings on Git-for-Windows, which puts a trailing \r on
-# every id it prints. That \r then returns the cursor mid-line (garbled report)
-# and breaks `select(.id == $id)` lookups. Strip it at the source.
+# Some jq builds emit CRLF, leaving a trailing \r on every id printed. That \r
+# garbles the report and breaks `select(.id == $id)` lookups. Strip it at source.
 jqr() { jq -r "$@" | tr -d '\r'; }
 
 # ---- resolve the diff range ------------------------------------------------
@@ -130,8 +129,8 @@ cut -f1 "$HITS" | sort -u | while IFS= read -r id; do
   title="$(jqr --arg id "$id" '.[] | select(.id==$id) | .title' "$CORPUS" | head -1)"
   status="$(jqr --arg id "$id" '.[] | select(.id==$id) | .status' "$CORPUS" | head -1)"
   printf '  %s%s%s  [%s]  %s\n' "$c_bld" "$id" "$c_rst" "$status" "${title:0:88}"
-  # Plain awk on the id field: grep -P is unavailable under non-UTF-8 locales in
-  # Git-for-Windows, and an id like affine-hn1.2 is a regex if fed to grep.
+  # Plain awk on the id field: grep -P is not portable, and an id like
+  # affine-hn1.2 is a regex if fed to grep.
   awk -F'\t' -v id="$id" '$1 == id { print $2 }' "$HITS" | sort -u | sed 's/^/        /'
 done
 
