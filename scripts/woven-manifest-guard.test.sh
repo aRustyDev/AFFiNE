@@ -330,7 +330,7 @@ else
 fi
 
 # --- 17. known-good outbound: a branch built FROM the baseline ---------------
-# The counter-fixture: a guard that simply always failed would satisfy #9. This
+# The counter-fixture: a guard that simply always failed would satisfy #13. This
 # builds the branch woven-upstream-branch.sh will build — the upstream baseline
 # plus one ADDITIVE file, the manifest's own nominated upstream candidate — with
 # plumbing, so no branch, index or working tree is touched.
@@ -351,6 +351,23 @@ if [ -z "$OB_REF" ]; then
 else
   run_guard --outbound --head "$OB_REF"
   expect_rc 0 "clean"
+
+  # rc 0 alone cannot tell "the outbound check ran and cleared this branch" from
+  # "no check ran" — deleting the whole --outbound block leaves this fixture
+  # green. Assert the guard's OWN success message and its OWN change count. The
+  # count also catches the fixture commit degrading to an empty diff, which
+  # write-tree/commit-tree absorb silently: if ls-tree finds no OB_FILE, the
+  # cacheinfo add fails and the tree stays the pristine baseline.
+  if grep -qF -- "1 changed vs baseline · 1 upstream-owned" "$OUT"; then
+    ok "the fixture commit really carries exactly one upstream-owned change"
+  else
+    bad "fixture commit is not the intended baseline+one-ADDITIVE-file branch"; dump
+  fi
+  if grep -qF -- "no FORK-LOCAL CORE PATCH in this change set" "$OUT"; then
+    ok "cleared by the outbound check specifically"
+  else
+    bad "exit 0 did not come from the outbound clean path"; dump
+  fi
 fi
 
 echo
