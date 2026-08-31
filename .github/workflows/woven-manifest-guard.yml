@@ -16,14 +16,50 @@ on:
   pull_request:
     branches:
       - woven/main
+  # The OUTBOUND backstop. A workflow in this fork CANNOT gate a PR into
+  # toeverything/AFFiNE — pull_request runs workflows from the BASE repo, so
+  # upstream runs upstream's and ours never execute. The branch prefix is the
+  # only signal available here, which is why woven-upstream-branch.sh applies it
+  # for you rather than leaving it to memory.
+  push:
+    branches:
+      - 'upstream/**'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  fixtures:
+    name: Guard fixtures
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 is REQUIRED. Several fixtures build throwaway commits
+      # parented on the upstream baseline, which is reachable only as a merge
+      # parent — a shallow checkout cannot resolve it and they fail as exit 2.
+      - name: Checkout (full history — baseline is a merge parent)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Manifest guard fixtures
+        run: scripts/woven-manifest-guard.test.sh
+
+      - name: Branch-preparer fixtures
+        run: scripts/woven-upstream-branch.test.sh
+
+      - name: Pre-push hook fixtures
+        run: scripts/woven-pre-push.test.sh
+
+      # The sweep itself is NOT run in CI — bd needs a shared Dolt server that
+      # runners cannot reach — but its fixtures use a frozen bead corpus, so the
+      # affine-hn1.3 v0.27.4 dry-run stays permanently verified.
+      - name: Drift-sweep fixtures (frozen v0.27.4 dry-run)
+        run: scripts/woven-drift-sweep.test.sh
+
   manifest-guard:
     name: Upstream divergence is manifested
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       # fetch-depth: 0 is REQUIRED. The baseline is the upstream commit the fork
@@ -36,14 +72,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Guard fixtures (self-test)
-        run: scripts/woven-manifest-guard.test.sh
-
-      # The sweep itself is NOT run in CI — bd needs a shared Dolt server that
-      # runners cannot reach — but its fixtures use a frozen bead corpus, so the
-      # affine-hn1.3 v0.27.4 dry-run stays permanently verified.
-      - name: Drift-sweep fixtures (frozen v0.27.4 dry-run)
-        run: scripts/woven-drift-sweep.test.sh
-
       - name: Manifest guard
         run: scripts/woven-manifest-guard.sh
+
+  upstream-leak-guard:
+    name: No fork-local patch on an upstream branch
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history — baseline is a merge parent)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Outbound leak guard
+        run: scripts/woven-manifest-guard.sh --outbound
