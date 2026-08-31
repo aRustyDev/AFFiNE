@@ -31,7 +31,7 @@
 #
 # Usage:
 #   scripts/woven-manifest-guard.sh [--base REF] [--head REF] [--manifest PATH]
-#   scripts/woven-manifest-guard.sh --outbound [--base REF] [--head REF]
+#   scripts/woven-manifest-guard.sh --outbound [--base REF] [--head REF] [--manifest PATH]
 #
 # INBOUND (default): fail when an upstream-owned file diverges with no manifest
 # row — don't silently lose a fork patch to the next upstream merge.
@@ -68,7 +68,7 @@ while [ $# -gt 0 ]; do
     --head)     [ $# -ge 2 ] || die "--head needs a ref";      HEAD_REF="$2"; HEAD_EXPLICIT=1; shift 2 ;;
     --manifest) [ $# -ge 2 ] || die "--manifest needs a path"; MANIFEST="$2"; shift 2 ;;
     --outbound) OUTBOUND=1; shift ;;
-    -h|--help)  sed -n '2,43p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help)  awk 'NR>1 && !/^#/{exit} NR>1' "${BASH_SOURCE[0]}"; exit 0 ;;
     *)          die "unknown argument: $1" ;;
   esac
 done

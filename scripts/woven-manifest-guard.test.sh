@@ -142,10 +142,15 @@ fi
 
 echo "== woven-manifest-guard OUTBOUND fixtures =="
 
-# --- 7. the flag exists ------------------------------------------------------
+# --- 7. the flag exists -------------------------------------------------------
+# Only asserts "not a usage error" (rc != 2), not "clean" (rc == 0): once Task 3
+# lands the actual outbound check, this same invocation is expected to fail with
+# rc 1 against woven/main's real oidc.ts fork-local patch. That is correct
+# behaviour for the finished guard, not a regression in this fixture.
 echo "-- outbound: --outbound is accepted"
 run_guard --outbound --head HEAD
-expect_rc 0 "clean"
+if [ "$RC" -ne 2 ]; then ok "--outbound accepted (exit $RC, not a usage error)"
+else bad "--outbound rejected as a usage error"; dump; fi
 
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
