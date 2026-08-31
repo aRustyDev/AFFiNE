@@ -185,3 +185,29 @@ there is no "database is newer than me, refuse to start" guard and no
 down-migration path. Require a **verified-restorable** backup before deploying
 across one. Backup/restore is a cluster-side (CNPG) concern; see
 `docs/src/operations/affine-pg-restore-drill.md` in the infrastructure repo.
+
+### Contributing back to upstream
+
+`affine-cm9` allows ADDITIVE changes to be upstreamed and forbids FORK-LOCAL CORE
+PATCHes from ever reaching `toeverything/AFFiNE`. Three things enforce that, all
+calling `scripts/woven-manifest-guard.sh --outbound`:
+
+1. `scripts/woven-upstream-branch.sh [--from REF] [--no-switch] <name> <path>...`
+   — branches from the upstream baseline rather than `woven/main`, so the branch
+   cannot carry a fork-local patch. Start here.
+2. `.husky/pre-push` — refuses a push whose destination URL is `UPSTREAM_REPO`.
+   Bypassable with `git push --no-verify`.
+3. CI on push to `upstream/**` — the backstop for a push the hook did not see.
+
+The prepared branch is a starting point: review, cherry-pick and squash it as
+needed. The clean result the preparer reports describes the branch at creation,
+not the branch you eventually push — which is why the last two exist.
+
+`--outbound` only judges a branch that is already inbound-clean: it runs the
+unmanifested-row and stale-row checks first and refuses to judge a branch that
+fails them, so a manifest row the parser cannot read can never silently pass a
+fork-local patch through. An unrecognised category in
+`scripts/woven-patch-manifest.md` exits 2 rather than being assumed ADDITIVE.
+`scripts/woven-manifest-guard.sh --dump-rows` shows exactly what the parser and
+classifier saw for each row, if one of the three layers above refuses something
+unexpectedly.
