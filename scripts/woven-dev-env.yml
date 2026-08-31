@@ -1,0 +1,14 @@
+# Optional dev environment for the Woven fork: a Node runtime matching the
+# package.json `engines` range, plus jq (used by scripts/woven-drift-sweep.sh)
+# and go (to build actionlint). JS tooling versions come from package.json and
+# .yarnrc.yml, not from here.
+
+name: affine
+
+channels:
+  - conda-forge
+
+dependencies:
+  - nodejs=22.22.3 # package.json engines: >=22.12.0 <23.0.0
+  - jq
+  - go

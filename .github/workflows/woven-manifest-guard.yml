@@ -1,0 +1,49 @@
+name: woven-manifest-guard
+
+# Fork-local (woven-* namespaced), rebase-safe: a new fork-owned workflow file,
+# NOT an edit to upstream's build-test.yml. Enforces scripts/woven-patch-manifest.md
+# — bead affine-hn1.2, epic affine-hn1, strategy affine-cm9.
+#
+# TRIGGER, deliberately: `pull_request:`, not `push:`. Upstream's build-test.yml
+# `push:` list covers canary/beta/stable/v*.x and NOT woven/*, so a guard wired to
+# push: would never fire on this fork — see merge-time checklist step 6 in the
+# manifest. PRs into woven/main are the only chokepoint that actually runs.
+#
+# No paths-ignore: ANY changed file could be upstream-owned, so the guard has to
+# see every PR.
+
+on:
+  pull_request:
+    branches:
+      - woven/main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  manifest-guard:
+    name: Upstream divergence is manifested
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 is REQUIRED. The baseline is the upstream commit the fork
+      # merged from (scripts/woven-upstream-baseline). It is reachable only as the
+      # merge commit's second parent — upstream's tags are not pushed to this
+      # fork's origin — so a shallow checkout cannot resolve it and the guard
+      # exits 2 rather than passing vacuously.
+      - name: Checkout (full history — baseline is a merge parent)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Guard fixtures (self-test)
+        run: scripts/woven-manifest-guard.test.sh
+
+      # The sweep itself is NOT run in CI — bd needs a shared Dolt server that
+      # runners cannot reach — but its fixtures use a frozen bead corpus, so the
+      # affine-hn1.3 v0.27.4 dry-run stays permanently verified.
+      - name: Drift-sweep fixtures (frozen v0.27.4 dry-run)
+        run: scripts/woven-drift-sweep.test.sh
+
+      - name: Manifest guard
+        run: scripts/woven-manifest-guard.sh
