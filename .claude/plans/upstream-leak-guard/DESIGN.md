@@ -116,6 +116,26 @@ from `woven/main` shows `oidc.ts` as diverged, which is the violation.
 
 Output names every offending path, so the fix is mechanical.
 
+### Outbound is an ADDITIONAL question, not a separate one
+
+Outbound runs the inbound unmanifested check **first**, and only consults the
+FORK-LOCAL list if that passes. This is a correctness requirement, not tidiness.
+
+The outbound answer is derived from the manifest, so a row the parser fails to
+read silently removes its file from the FORK-LOCAL set — and an empty set is
+indistinguishable from "nothing to leak". Markdown offers more ways to write a
+row than a parser can be trusted to cover (a missing leading pipe, which GFM
+permits; a `#`-prefixed line appearing mid-table; an escaped `\|` in a cell), so
+hardening the parser shape-by-shape is a losing game.
+
+Requiring every upstream-owned change to be manifested first closes the whole
+class at once: a row that fails to parse makes its file **unmanifested**, which
+is already a failure. Any future parser gap therefore fails closed by
+construction rather than by having been anticipated.
+
+This also means the two checks cannot disagree. A branch cannot be "clean to
+send upstream" while carrying a divergence the fork has not declared.
+
 ### Fail closed
 
 A manifest row whose category is neither recognisably `FORK-LOCAL CORE PATCH`

@@ -299,22 +299,38 @@ Expected: FAIL — `exit 0; expected 1 (policy violation)`. The flag is parsed a
 
 - [ ] **Step 3: Branch the two modes**
 
-In `scripts/woven-manifest-guard.sh`, find the line:
+Placement matters and is a correctness requirement, not tidiness. Outbound must run **after** `UNMANIFESTED` is computed, and must fail on it before consulting `FORKLOCAL`.
 
-```bash
-# ---- check 1: unmanifested upstream-owned divergence -----------------------
-```
+The reason: the outbound answer is derived from the manifest, so a row the parser fails to read silently drops its file out of `FORKLOCAL` — and an empty `FORKLOCAL` is indistinguishable from "nothing to leak". Markdown has more legal ways to write a row than a parser can be trusted to cover. Requiring every upstream-owned change to be manifested first closes that whole class at once: a row that fails to parse makes its file unmanifested, which is already a failure. Any future parser gap then fails closed by construction rather than by having been anticipated.
 
-Insert this block immediately **above** it:
+In `scripts/woven-manifest-guard.sh`, find the `UNMANIFESTED=` assignment under `# ---- check 1:` and insert this block immediately **after** it (not before — `UNMANIFESTED` must already be set):
 
 ```bash
 # ---- OUTBOUND mode: don't leak a fork patch to upstream --------------------
-# Asks the opposite question of the inbound checks, over the same inputs: not
+# Asks an ADDITIONAL question to the inbound one, over the same inputs: not just
 # "is this divergence declared?" but "is this change set carrying something
-# marked NEVER-upstream?". Compared against CHANGED rather than UPSTREAM_OWNED
-# because that is the honest question — though a FORK-LOCAL row is upstream-owned
-# by construction, so in practice the two agree.
+# marked NEVER-upstream?".
+#
+# The unmanifested check runs FIRST and is fatal here too. FORKLOCAL is derived
+# from the manifest, so a row the parser cannot read silently leaves the set, and
+# an empty set looks exactly like "nothing to leak". An unreadable row makes its
+# file unmanifested, so gating on that makes every parser gap fail closed —
+# including shapes nobody anticipated. It also means the two checks can never
+# disagree: a branch cannot be "safe to send upstream" while carrying a
+# divergence the fork has not declared.
+#
+# LEAKED is compared against CHANGED rather than UPSTREAM_OWNED because that is
+# the honest question — though a FORK-LOCAL row is upstream-owned by
+# construction, so in practice the two agree.
 if [ "$OUTBOUND" -eq 1 ]; then
+  if [ -n "$UNMANIFESTED" ]; then
+    err "cannot judge this change set: upstream-owned file(s) with no manifest row:"
+    while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$UNMANIFESTED"
+    err ""
+    err "  An undeclared divergence has no category, so it cannot be cleared for"
+    err "  upstream. Add a row to ${MANIFEST#"$REPO_ROOT/"} — or revert the change."
+    exit 1
+  fi
   LEAKED="$(comm -12 <(printf '%s\n' "$CHANGED"   | sed 's#^\./##' | sed '/^$/d' | sort -u) \
                      <(printf '%s\n' "$FORKLOCAL" | sed '/^$/d' | sort -u))"
   if [ -n "$LEAKED" ]; then
@@ -322,7 +338,7 @@ if [ "$OUTBOUND" -eq 1 ]; then
     while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$LEAKED"
     err ""
     err "  These files change upstream behaviour and must NEVER reach upstream (affine-cm9)."
-    err "  This branch is not safe to send to \$UPSTREAM_REPO."
+    err "  This branch is not safe to send to the upstream repository."
     err "  Start an upstream-bound branch from the upstream baseline instead:"
     err "    scripts/woven-upstream-branch.sh <name> <path>..."
     err "  There is no override. If a category is genuinely wrong, change the"
@@ -335,12 +351,26 @@ fi
 
 ```
 
-Everything below stays as the inbound path. Outbound returns before reaching it, so the two modes never interleave.
+Everything below stays as the inbound path. Outbound returns before reaching the STALE check and the report, so the two modes never interleave.
+
+Add a fixture for the new ordering, since it is the thing that makes every parser gap safe:
+
+```bash
+# --- 9b. outbound refuses to judge an undeclared divergence ------------------
+# Not a duplicate of the inbound unmanifested fixture: it pins the ORDERING.
+# If outbound consulted FORKLOCAL first, a manifest row that failed to parse
+# would drop its file out of the set and the leak check would pass vacuously.
+echo "-- outbound: an unmanifested upstream-owned file is not judgeable"
+grep -v -- "providers/oidc.ts" "$MANIFEST" >"$TMPDIR_T/m-nooidc.md"
+run_guard --outbound --manifest "$TMPDIR_T/m-nooidc.md" --head HEAD
+expect_rc 1 "policy violation"
+expect_names "$OIDC_PATH"
+```
 
 - [ ] **Step 4: Run the suite**
 
 Run: `scripts/woven-manifest-guard.test.sh`
-Expected: `== 20 passed, 0 failed ==`
+Expected: every prior assertion still green, plus 6 new ones (fixtures 9, 9b and 10). Record the new total — later tasks compare against it rather than a fixed number.
 
 - [ ] **Step 5: Check it by hand against the real tree**
 
@@ -413,7 +443,7 @@ fi
 - [ ] **Step 2: Run the suite**
 
 Run: `scripts/woven-manifest-guard.test.sh`
-Expected: `== 21 passed, 0 failed ==`
+Expected: the total from task 3, plus 1.
 
 This should pass immediately — Task 3 already implemented the behaviour. If it fails, the outbound check is comparing against the wrong base.
 
@@ -463,7 +493,7 @@ Expected: `b4c8548c09da21b2898443559a5b846f0ccf5dd8` then `toeverything/AFFiNE`.
 - [ ] **Step 3: Confirm the guard is unaffected**
 
 Run: `scripts/woven-manifest-guard.test.sh`
-Expected: `== 21 passed, 0 failed ==`
+Expected: unchanged from task 4 — this task adds no fixtures, and a changed count here means the baseline file edit broke parsing.
 
 - [ ] **Step 4: Commit**
 
@@ -1073,7 +1103,7 @@ not the branch you eventually push — which is why the last two exist.
 The guard reads this file. An edit that broke the table heading or a row would be caught here.
 
 Run: `scripts/woven-manifest-guard.test.sh`
-Expected: `== 21 passed, 0 failed ==`
+Expected: unchanged from task 4. A changed count here means the manifest edit broke the guard's parsing of its own table.
 
 - [ ] **Step 4: Commit**
 
@@ -1102,7 +1132,7 @@ scripts/woven-pre-push.test.sh
 scripts/woven-drift-sweep.test.sh
 ```
 
-Expected: `21 passed`, `8 passed`, `7 passed`, `11 passed` — all with `0 failed`.
+Expected: the task 4 total, then `8 passed`, `7 passed`, `11 passed` — all with `0 failed`.
 
 - [ ] **Step 2: Run both guard directions against the real tree**
 
