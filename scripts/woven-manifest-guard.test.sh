@@ -272,6 +272,24 @@ fi
 # fully present on the branch under a new name. Built with plumbing against a
 # scratch index seeded from HEAD, so no branch, index or working tree is
 # touched.
+#
+# A plain "not clean" assertion here cannot tell WHICH fix is doing the work:
+# STALE's own tree-presence check (git cat-file, independent of any diff flag)
+# already catches oidc.ts's absence on its own, so reverting --no-renames
+# alone still exits 1 here, and reverting the STALE gate alone still exits 1
+# here too (LEAKED catches it via --no-renames). Verified by hand against
+# single-fix mutants of the guard. So this fixture asserts two SEPARATE
+# signals, each driven by the guard's own execution, not a re-derivation:
+#   (a) the STALE gate specifically ran — the exact "manifest row(s) whose
+#       path no longer exists" message, not just any exit-1 message. A guard
+#       that dropped the STALE gate would fall through to LEAKED instead and
+#       print the FORK-LOCAL leak message here, not this one.
+#   (b) --no-renames specifically took effect — the guard's own "N upstream-
+#       owned" count in its log line, which is 3 (oidc.ts + seed/index.ts +
+#       build-test.yml) only because oidc.ts's OLD path still shows up in
+#       CHANGED. Restore rename detection (drop --no-renames, or reintroduce
+#       it "for nicer reporting") and oidc.ts vanishes from CHANGED, so this
+#       drops to 2 — independent of whatever the STALE gate does.
 echo "-- outbound: a rename hides the fork-local path from a default diff"
 RENAME_PATH="packages/backend/server/src/plugins/oauth/providers/oidc-provider.ts"
 rn_index="$TMPDIR_T/index.rename"
@@ -292,6 +310,23 @@ else
   run_guard --outbound --head "$RN_REF"
   expect_rc 1 "not clean -- either a leak or a refusal to judge a stale row"
   expect_names "$OIDC_PATH"
+
+  # (a) pins the STALE gate: the specific "cannot judge" / stale-row message.
+  if grep -qF -- "manifest row(s) whose path no longer exists in the tree" "$OUT"; then
+    ok "outbound refused to judge via the STALE gate specifically"
+  else
+    bad "outbound did not report the STALE-specific message -- the STALE gate may not be running"
+    dump
+  fi
+
+  # (b) pins --no-renames: the guard's own upstream-owned count, driven by its
+  # own CHANGED computation, not a re-derivation of git's behaviour.
+  if grep -qF -- "3 upstream-owned" "$OUT"; then
+    ok "--no-renames kept the source path ($OIDC_PATH) in the guard's own CHANGED"
+  else
+    bad "guard's upstream-owned count does not reflect the source path -- --no-renames may be missing"
+    dump
+  fi
 fi
 
 echo

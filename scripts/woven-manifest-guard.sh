@@ -257,13 +257,18 @@ fi
 #
 # --no-renames: rename detection is ON by default and --name-only then reports
 # only the DESTINATION path. Renaming a FORK-LOCAL CORE PATCH file to a new
-# name with unchanged content would make the manifested (source) path vanish
-# from this list entirely, so both the unmanifested check and the outbound
-# leak check would see nothing — a stale row is how that gets caught instead
-# (see STALE below). -c core.quotePath=false: the default quotePath=true
-# C-quotes non-ASCII paths (e.g. `pkg/café.ts` -> `"pkg/caf\303\251.ts"`), and
-# that quoted form matches nothing in the manifest or in git cat-file lookups
-# — a silent drop from both UPSTREAM_OWNED and FORKLOCAL alike.
+# name with unchanged content would otherwise make the manifested (source)
+# path vanish from this list entirely, so neither the unmanifested check nor
+# the outbound leak check (LEAKED, below) would ever see it. With --no-renames
+# BOTH paths appear here, so LEAKED catches the source path directly — this
+# flag is load-bearing on its own, not a fallback for the STALE check below.
+# STALE is a second, independent net: it catches the same rename a different
+# way (the manifested path no longer resolves in the tree), which matters if
+# this flag were ever weakened or renames were reintroduced for nicer
+# reporting. -c core.quotePath=false: the default quotePath=true C-quotes
+# non-ASCII paths (e.g. `pkg/café.ts` -> `"pkg/caf\303\251.ts"`), and that
+# quoted form matches nothing in the manifest or in git cat-file lookups — a
+# silent drop from both UPSTREAM_OWNED and FORKLOCAL alike.
 if [ "$WORKTREE" -eq 1 ]; then
   CHANGED="$(git -c core.quotePath=false diff --no-renames --name-only "$BASE_SHA" | sed '/^$/d')"
 else
@@ -289,6 +294,9 @@ log "${n_changed} changed vs baseline · ${n_upstream} upstream-owned · ${n_row
 UNMANIFESTED="$(comm -23 <(printf '%s\n' "$UPSTREAM_OWNED" | sed '/^$/d') \
                          <(printf '%s\n' "$MANIFESTED"     | sed '/^$/d'))"
 comm_rc=$?
+# Assertion: both inputs are sorted above (sort -u, under LC_ALL=C), so this
+# should be unreachable. Checked anyway rather than trusted, because a wrong
+# answer here is a silent policy determination, not a crash.
 [ "$comm_rc" -eq 0 ] || die "comm failed while computing UNMANIFESTED (exit $comm_rc) — an environment error, not a policy determination; refusing to report a possibly-wrong result."
 
 # ---- check 2: rows whose path is gone from the tree ------------------------
@@ -349,9 +357,16 @@ if [ "$OUTBOUND" -eq 1 ]; then
     fi
     exit 1
   fi
+  # Compared against CHANGED, not UPSTREAM_OWNED: a FORK-LOCAL row on a file
+  # absent at the baseline (e.g. a fork-created file later reclassified, or the
+  # destination side of a rename) would otherwise escape this check, since
+  # UPSTREAM_OWNED excludes anything that doesn't exist at the baseline.
   LEAKED="$(comm -12 <(printf '%s\n' "$CHANGED"   | sed '/^$/d' | sort -u) \
                      <(printf '%s\n' "$FORKLOCAL" | sed '/^$/d' | sort -u))"
   comm_rc=$?
+  # Assertion: both inputs are sorted above (sort -u, under LC_ALL=C), so this
+  # should be unreachable. Checked anyway rather than trusted, because a wrong
+  # answer here is a silent policy determination, not a crash.
   [ "$comm_rc" -eq 0 ] || die "comm failed while computing LEAKED (exit $comm_rc) — an environment error, not a policy determination; refusing to report a possibly-wrong result."
   if [ -n "$LEAKED" ]; then
     err "FORK-LOCAL CORE PATCH on an upstream-directed change set:"
