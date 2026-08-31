@@ -150,6 +150,20 @@ Behaviour:
 - Refuses to run on a dirty tree, consistent with the rest of the `woven-*`
   scripts.
 
+**The branch is a starting point, not a finished contribution.** The developer
+reviews and adjusts it before pushing — cherry-picking further commits, editing
+files, squashing. Both file-picking (this script) and cherry-picking will be used
+in practice, and the script deliberately does not try to cover both: it gets you
+a correctly-based branch to work from.
+
+This means layer 1's guarantee is **not durable**. A cherry-pick from
+`woven/main` after the branch is created can reintroduce a fork-local patch, and
+the clean `--outbound` result the script reported at creation time no longer
+describes the branch being pushed. Layers 2 and 3 are therefore load-bearing
+rather than redundant: they re-check at the moment of push, and on every push to
+`upstream/**`, which is the only point at which the branch's final content is
+known.
+
 ## Layer 2 — `.husky/pre-push`
 
 Pre-push receives the remote name and URL on argv. If the destination URL
