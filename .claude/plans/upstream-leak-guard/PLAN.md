@@ -271,7 +271,28 @@ fork-local patch would ship to upstream unnoticed."
 - Modify: `scripts/woven-manifest-guard.sh` (checks + report)
 - Test: `scripts/woven-manifest-guard.test.sh`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Make `FORKLOCAL` a view of the dump, not a sibling of it**
+
+Do this before anything else — it is the moment `FORKLOCAL` starts carrying weight.
+
+Task 2 built `CLASSIFIED` (what `--dump-rows` prints) and `FORKLOCAL` (what this task consumes) side by side inside the same `case` dispatch. They agree today, but nothing makes them agree: moving only the `FORKLOCAL` append from one `case` arm to the other fully inverts the list this task acts on, and the whole suite still passes — the dump keeps printing the correct pairing while `FORKLOCAL` holds exactly the wrong files. The fixture that observes the dump cannot see it.
+
+Delete the `FORKLOCAL="${FORKLOCAL}${p}"$'\n'` append from the `case` arm, and derive the list from the observed value after the loop instead:
+
+```bash
+# FORKLOCAL is DERIVED from CLASSIFIED — the same value --dump-rows prints — so
+# the list this guard acts on is the list an operator can inspect. Building the
+# two in parallel would let them drift, and a fixture over the dump could not
+# see it. Exact field match, never a substring: a marker line must not be
+# mistaken for a classification.
+FORKLOCAL="$(printf '%s' "$CLASSIFIED" | awk -F'\t' '$2=="FORK-LOCAL CORE PATCH"{print $1}' | sort -u)"
+```
+
+Amend the comment above the classification block at the same time: it currently claims the dump can observe a bug in the dispatch itself, which was only true of the predicate, not of the assignment. After this change it is true of both.
+
+Confirm the suite is unchanged, then verify the coupling is real: temporarily swap the two `case` arm bodies in a scratch copy and check the dump fixture goes red. Delete the scratch copy.
+
+- [ ] **Step 2: Write the failing test**
 
 Append to `scripts/woven-manifest-guard.test.sh`, before the summary block:
 
@@ -292,12 +313,12 @@ grep -qF -- "$SEED_PATH" "$OUT" && bad "outbound named an ADDITIVE file: $SEED_P
 grep -qF -- ".github/workflows/build-test.yml" "$OUT" && bad "outbound named an ADDITIVE file: build-test.yml" || ok "ADDITIVE build-test.yml not named"
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 3: Run it to verify it fails**
 
 Run: `scripts/woven-manifest-guard.test.sh 2>&1 | tail -8`
 Expected: FAIL — `exit 0; expected 1 (policy violation)`. The flag is parsed and the categories are classified, but nothing acts on them.
 
-- [ ] **Step 3: Branch the two modes**
+- [ ] **Step 4: Branch the two modes**
 
 Placement matters and is a correctness requirement, not tidiness. Outbound must run **after** `UNMANIFESTED` is computed, and must fail on it before consulting `FORKLOCAL`.
 
@@ -367,12 +388,12 @@ expect_rc 1 "policy violation"
 expect_names "$OIDC_PATH"
 ```
 
-- [ ] **Step 4: Run the suite**
+- [ ] **Step 5: Run the suite**
 
 Run: `scripts/woven-manifest-guard.test.sh`
 Expected: every prior assertion still green, plus 6 new ones (fixtures 9, 9b and 10). Record the new total — later tasks compare against it rather than a fixed number.
 
-- [ ] **Step 5: Check it by hand against the real tree**
+- [ ] **Step 6: Check it by hand against the real tree**
 
 ```bash
 scripts/woven-manifest-guard.sh --outbound --head HEAD; echo "rc=$?"
@@ -386,7 +407,7 @@ scripts/woven-manifest-guard.sh --head HEAD; echo "rc=$?"
 
 Expected: `rc=0` — inbound still clean.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add scripts/woven-manifest-guard.sh scripts/woven-manifest-guard.test.sh
