@@ -140,6 +140,13 @@ else
   expect_names "$VICTIM"
 fi
 
+echo "== woven-manifest-guard OUTBOUND fixtures =="
+
+# --- 7. the flag exists ------------------------------------------------------
+echo "-- outbound: --outbound is accepted"
+run_guard --outbound --head HEAD
+expect_rc 0 "clean"
+
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

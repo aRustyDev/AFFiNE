@@ -31,6 +31,12 @@
 #
 # Usage:
 #   scripts/woven-manifest-guard.sh [--base REF] [--head REF] [--manifest PATH]
+#   scripts/woven-manifest-guard.sh --outbound [--base REF] [--head REF]
+#
+# INBOUND (default): fail when an upstream-owned file diverges with no manifest
+# row — don't silently lose a fork patch to the next upstream merge.
+# OUTBOUND (--outbound): fail when the change set touches a file whose manifest
+# row says FORK-LOCAL CORE PATCH — don't leak a fork patch to upstream.
 #
 # The baseline defaults to UPSTREAM_COMMIT in scripts/woven-upstream-baseline.
 # It must be RESOLVABLE: in CI use actions/checkout with fetch-depth: 0, since a
@@ -52,6 +58,7 @@ die()  { err "$*"; exit 2; }
 BASE=""
 HEAD_REF="HEAD"
 HEAD_EXPLICIT=0
+OUTBOUND=0
 MANIFEST="$REPO_ROOT/scripts/woven-patch-manifest.md"
 BASELINE_FILE="$REPO_ROOT/scripts/woven-upstream-baseline"
 
@@ -60,7 +67,8 @@ while [ $# -gt 0 ]; do
     --base)     [ $# -ge 2 ] || die "--base needs a ref";      BASE="$2";     shift 2 ;;
     --head)     [ $# -ge 2 ] || die "--head needs a ref";      HEAD_REF="$2"; HEAD_EXPLICIT=1; shift 2 ;;
     --manifest) [ $# -ge 2 ] || die "--manifest needs a path"; MANIFEST="$2"; shift 2 ;;
-    -h|--help)  sed -n '2,37p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    --outbound) OUTBOUND=1; shift ;;
+    -h|--help)  sed -n '2,43p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *)          die "unknown argument: $1" ;;
   esac
 done
