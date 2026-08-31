@@ -15,15 +15,27 @@
 # This is a seatbelt, not a lock — `git push --no-verify` walks past it. The CI
 # job on upstream/** is the backstop.
 #
+# EXIT CODES (mirrors woven-manifest-guard.sh's contract)
+#   0  not headed to upstream, or headed there and confirmed clean
+#   1  confirmed policy violation — the guard found a FORK-LOCAL CORE PATCH
+#   2  usage or environment error — this hook could not establish an answer,
+#      so it refuses out of caution rather than reporting "not upstream"
+#
 # FAIL-CLOSED BY DESIGN: every check below that cannot establish "this push is
-# definitely not headed to upstream" refuses the push (nonzero exit) instead of
-# waving it through. An empty destination URL, an unresolvable repo root, a
-# missing or unparseable baseline, and a missing or non-executable guard are all
-# silence that would otherwise be read as success — that exact shape (absence
-# read as success) is the bug class every review round on this plan has found.
+# definitely not headed to upstream" exits 2 instead of 0. An empty destination
+# URL, an unresolvable repo root, a missing or unparseable baseline, a value
+# read from the baseline that does not survive validation, and a missing or
+# unusable guard are all silence that would otherwise be read as success.
 # `--no-verify` remains the escape hatch for a genuinely broken environment;
 # this hook does not hand out an equivalent for free by exiting 0 when it does
 # not know the answer.
+#
+# Husky invokes this file as `sh -e`. Every check here already does its own
+# explicit exit, so errexit adds nothing but a risk: a plain
+# `x="$(cmd)"` assignment aborts the whole script the instant `cmd` fails,
+# before the surrounding `if` can print the diagnostic or before a later
+# guard_rc dispatch can run. `set +e` neutralises that regardless of how this
+# file is invoked, so every failure is handled by the code that names it.
 #
 # TESTING SEAM: WOVEN_GUARD overrides the guard binary invoked below (default
 # scripts/woven-manifest-guard.sh) — the same seam, and the same reason, as
@@ -31,17 +43,18 @@
 # (exit 1) or a clean result (exit 0) from the guard on demand, so the hook's
 # own dispatch logic can be tested without depending on what the current branch
 # happens to carry — a fixture that depends on the branch's content will rot.
+set +e
 
 remote_url="${2:-}"
 if [ -z "$remote_url" ]; then
   printf '%s\n' "[woven pre-push] no remote URL supplied (\$2 empty) — cannot confirm this push is not headed to upstream. Refusing." >&2
-  exit 1
+  exit 2
 fi
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"
 if [ -z "$repo_root" ]; then
   printf '%s\n' "[woven pre-push] could not resolve the repository root — refusing rather than pushing blind." >&2
-  exit 1
+  exit 2
 fi
 
 baseline="$repo_root/scripts/woven-upstream-baseline"
@@ -49,13 +62,25 @@ guard="${WOVEN_GUARD:-$repo_root/scripts/woven-manifest-guard.sh}"
 
 if [ ! -f "$baseline" ]; then
   printf '%s\n' "[woven pre-push] baseline file missing ($baseline) — cannot tell upstream from anywhere else. Refusing." >&2
-  exit 1
+  exit 2
 fi
 
-upstream_repo="$(sed -n 's/^UPSTREAM_REPO=//p' "$baseline" | head -1)"
+# Trimmed and shape-checked, not just non-empty: a bare `-z` check treats a
+# baseline line with trailing whitespace ("UPSTREAM_REPO=toeverything/AFFiNE ")
+# as a valid, non-empty needle — it IS non-empty, it simply then matches no
+# real URL, so every push (including a real one to upstream) falls through the
+# case statement below to its "not upstream" exit with no diagnostic at all.
+# Trimming closes the whitespace form of that; the owner/repo shape check
+# below closes the rest of it (a stray comment fragment, a copy-paste of the
+# whole line, anything else that is non-empty but not a repo identifier).
+upstream_repo="$(sed -n 's/^UPSTREAM_REPO=//p' "$baseline" | head -1 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 if [ -z "$upstream_repo" ]; then
   printf '%s\n' "[woven pre-push] UPSTREAM_REPO not found or empty in $baseline — cannot tell upstream from anywhere else. Refusing." >&2
-  exit 1
+  exit 2
+fi
+if ! printf '%s\n' "$upstream_repo" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+  printf '%s\n' "[woven pre-push] UPSTREAM_REPO in $baseline does not look like owner/repo (got '$upstream_repo') — refusing rather than guessing what upstream is." >&2
+  exit 2
 fi
 
 # Case-insensitively substring-match owner/repo against the URL, with and
@@ -66,6 +91,15 @@ fi
 # through unnoticed. Normalising the slash first is what closes that hole.
 needle="$(printf '%s' "$upstream_repo" | tr '[:upper:]' '[:lower:]')"
 haystack="$(printf '%s' "$remote_url" | tr '[:upper:]' '[:lower:]' | sed -e 's:/*$::' -e 's/\.git$//')"
+
+# A validated, non-empty $remote_url that normalises to an empty $haystack
+# would otherwise fall through the case below to "not upstream" with nothing
+# to say why — the same absence-as-success shape as everything else on this
+# page, just arriving from the other input.
+if [ -z "$haystack" ]; then
+  printf '%s\n' "[woven pre-push] could not normalise the destination URL ($remote_url) for comparison — refusing rather than guessing." >&2
+  exit 2
+fi
 
 case "$haystack" in
   *"$needle") ;;
@@ -79,14 +113,30 @@ printf '%s\n' "[woven pre-push] destination is UPSTREAM ($upstream_repo) — run
 
 if [ ! -x "$guard" ]; then
   printf '%s\n' "[woven pre-push] guard not found or not executable ($guard) — cannot verify this push is clean. Refusing." >&2
-  exit 1
+  exit 2
 fi
 
-if "$guard" --outbound --head HEAD; then
-  exit 0
-fi
-
-printf '%s\n' "[woven pre-push] PUSH REFUSED. This branch carries a FORK-LOCAL CORE PATCH (or the guard could not judge it — see output above)." >&2
-printf '%s\n' "[woven pre-push] Prepare an upstream branch instead:" >&2
-printf '%s\n' "[woven pre-push]   scripts/woven-upstream-branch.sh <name> <path>..." >&2
-exit 1
+# Capture the real code and dispatch on it explicitly, same as
+# scripts/woven-upstream-branch.sh: the guard's own contract is 0 clean / 1
+# policy violation / 2 usage-or-environment error. Collapsing those with a
+# bare `if ! "$guard"` would report an unresolvable baseline or an unparseable
+# manifest row (exit 2) as "your file is a fork-local patch" (exit 1) — a
+# misdiagnosis that sends the user to scripts/woven-upstream-branch.sh, which
+# will fail the exact same way for the exact same reason.
+"$guard" --outbound --head HEAD
+guard_rc=$?
+case "$guard_rc" in
+  0)
+    exit 0
+    ;;
+  1)
+    printf '%s\n' "[woven pre-push] PUSH REFUSED. This branch carries a FORK-LOCAL CORE PATCH." >&2
+    printf '%s\n' "[woven pre-push] Prepare an upstream branch instead:" >&2
+    printf '%s\n' "[woven pre-push]   scripts/woven-upstream-branch.sh <name> <path>..." >&2
+    exit 1
+    ;;
+  *)
+    printf '%s\n' "[woven pre-push] the guard could not judge this branch (exit $guard_rc) — see its output above. Refusing." >&2
+    exit 2
+    ;;
+esac

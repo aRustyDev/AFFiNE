@@ -15,6 +15,13 @@
 # patch lands upstream and the manifest row is removed — the stub makes the
 # guard's answer a fact this file controls, not a fact it happens to inherit.
 #
+# Every fixture below asserts BOTH the exit code and the specific diagnostic
+# message the hook is expected to print. An exit-code-only assertion cannot
+# tell "the -x check refused this" from "sh failed to exec a missing file and
+# the fallback branch refused it" — both are nonzero, only one is the check
+# the fixture claims to cover, and a deleted check would leave every such
+# fixture green.
+#
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,11 +31,17 @@ HOOK="$REPO_ROOT/.husky/pre-push"
 [ -f "$HOOK" ] || { echo "FATAL: $HOOK missing" >&2; exit 2; }
 
 # Refuse to run on a dirty tree up front rather than repairing one. No
-# fixture below edits a tracked file, but several change directory into a
-# scratch git repo and a stray `git checkout --` in a shared trap has bitten
-# this exact plan before (woven-upstream-branch.test.sh) — refusing on a
-# dirty tree costs nothing here and rules the whole class out.
-dirty_status_precheck="$(git status --porcelain --untracked-files=no)"; dirty_rc_precheck=$?
+# fixture below edits a tracked file — everything that needs a git repo to
+# poke at builds its own scratch one under TMPDIR_T — but a cleanup trap must
+# only ever touch what it itself created, and the cheapest way to guarantee
+# that is to never let this suite start against a tree it didn't create clean.
+# THIS_HOOK and THIS_SUITE are excluded from that scan on purpose: the normal
+# edit-hook / edit-fixture / re-run loop leaves exactly those two tracked
+# files modified and nothing else, and refusing to let this suite verify its
+# own pending edit is a usability bug, not a safety property — this check
+# exists to protect a developer's UNRELATED uncommitted work, which by
+# definition cannot live in the two files this suite is itself about.
+dirty_status_precheck="$(git status --porcelain --untracked-files=no -- . ':(exclude).husky/pre-push' ':(exclude)scripts/woven-pre-push.test.sh')"; dirty_rc_precheck=$?
 if [ "$dirty_rc_precheck" -ne 0 ] || [ -n "$dirty_status_precheck" ]; then
   echo "FATAL: working tree is dirty — commit or stash your changes before running this suite." >&2
   [ -n "$dirty_status_precheck" ] && printf '%s\n' "$dirty_status_precheck" >&2
@@ -47,14 +60,25 @@ OUT="$TMPDIR_T/out.txt"; RC=0
 # </dev/null: the hook must not depend on the stdin ref list, which is empty
 # for a branch the remote has not seen.
 run_hook() { sh "$HOOK" "$1" "$2" >"$OUT" 2>&1 </dev/null; RC=$?; }
+# Production is invoked by husky as `sh -e`; our own harness calls plain `sh`.
+# That gap is exactly how a `set -e` abort (a plain assignment's command
+# substitution failing) could go unnoticed here while still breaking the real
+# hook — see the "-e parity" pass below, which runs a subset of the same
+# fixtures through this instead.
+run_hook_strict() { sh -e "$HOOK" "$1" "$2" >"$OUT" 2>&1 </dev/null; RC=$?; }
 # Same, but with $2 entirely absent (as opposed to present-and-empty) and run
 # from an arbitrary directory — used by the environment-error fixtures below,
 # which need control over either argv or the invocation directory.
 run_hook_argv() { ( cd "$1" && shift && sh "$HOOK" "$@" >"$OUT" 2>&1 </dev/null ); RC=$?; }
 dump()     { sed 's/^/     | /' "$OUT" >&2; }
+# Literal (-F) substring match against the last run's captured output — the
+# thing that actually distinguishes "the check this fixture names fired" from
+# "some other nonzero exit happened to occur".
+has_msg()  { grep -qF "$1" "$OUT"; }
 
 # Three-line stub guards for the WOVEN_GUARD testing seam (identical pattern
-# to scripts/woven-upstream-branch.test.sh's STUB_RC1/STUB_RC2).
+# to scripts/woven-upstream-branch.test.sh's STUB_RC1/STUB_RC2), covering all
+# three points of the guard's own exit contract.
 STUB_VIOLATION="$TMPDIR_T/stub-guard-violation.sh"
 cat > "$STUB_VIOLATION" <<'EOF'
 #!/usr/bin/env bash
@@ -71,6 +95,53 @@ exit 0
 EOF
 chmod +x "$STUB_CLEAN"
 
+# rc=2 is the guard's OWN usage/environment error (unresolvable baseline, an
+# unparseable manifest row) — distinct from rc=1, and the hook must not
+# collapse the two into the same "FORK-LOCAL CORE PATCH" diagnosis.
+STUB_ENV_ERROR="$TMPDIR_T/stub-guard-env-error.sh"
+cat > "$STUB_ENV_ERROR" <<'EOF'
+#!/usr/bin/env bash
+echo "STUB GUARD: simulated usage/environment error (rc=2) for test purposes"
+exit 2
+EOF
+chmod +x "$STUB_ENV_ERROR"
+
+# Runtime capability probe, not an assumption: on some hosts (observed on this
+# workstation's NTFS/MSYS git-bash) `chmod 644` does not clear `[ -x ]` for a
+# freshly created file, so a fixture that relies on that to simulate "guard
+# present but not executable" would be vacuous there while still being a real,
+# meaningful check on a POSIX runner (this suite's CI home is ubuntu-latest).
+# Decide by testing the actual filesystem instead of naming the workstation.
+chmod_enforces_no_x() {
+  local probe="$TMPDIR_T/.xprobe.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$probe"
+  chmod 644 "$probe"
+  if [ -x "$probe" ]; then
+    rm -f "$probe"
+    return 1
+  fi
+  rm -f "$probe"
+  return 0
+}
+
+# Symmetric probe for the other direction: this workstation's tmp mount was
+# observed, mid-session, to leave a freshly `chmod +x`'d file at `-rw-r--r--`
+# (no error, bit simply does not take) — the opposite anomaly from the one
+# chmod_enforces_no_x guards against, and just as capable of making a fixture
+# that assumes chmod "works" pass or fail for the wrong reason. Verify instead
+# of assume.
+chmod_grants_x() {
+  local probe="$TMPDIR_T/.xprobe2.sh"
+  printf 'exit 0\n' > "$probe"
+  chmod +x "$probe"
+  if [ -x "$probe" ]; then
+    rm -f "$probe"
+    return 0
+  fi
+  rm -f "$probe"
+  return 1
+}
+
 echo "== woven pre-push fixtures =="
 
 echo "-- upstream destination + guard reports a violation: refused"
@@ -80,12 +151,24 @@ for url in "https://github.com/toeverything/AFFiNE.git" \
            "https://github.com/toeverything/AFFiNE.git/" \
            "https://github.com/toeverything/AFFiNE/"; do
   WOVEN_GUARD="$STUB_VIOLATION" run_hook "some-remote-name" "$url"
-  if [ "$RC" -ne 0 ]; then ok "refused $url"; else bad "ALLOWED $url — this is the leak"; dump; fi
+  if [ "$RC" -eq 1 ] && has_msg "FORK-LOCAL CORE PATCH"; then
+    ok "refused $url"
+  else
+    bad "did not cleanly refuse $url (rc=$RC) — this is the leak"; dump
+  fi
 done
 
 echo "-- upstream destination + guard reports clean: allowed"
 WOVEN_GUARD="$STUB_CLEAN" run_hook "some-remote-name" "https://github.com/toeverything/AFFiNE.git"
 if [ "$RC" -eq 0 ]; then ok "allowed when the guard reports clean"; else bad "refused a clean branch — false positive"; dump; fi
+
+echo "-- upstream destination + guard cannot judge (rc=2): refused, but not misreported as a policy violation"
+WOVEN_GUARD="$STUB_ENV_ERROR" run_hook "origin" "https://github.com/toeverything/AFFiNE.git"
+if [ "$RC" -eq 2 ] && has_msg "the guard could not judge this branch" && ! has_msg "FORK-LOCAL CORE PATCH"; then
+  ok "refused with the guard's own rc=2 diagnosis, not collapsed into a policy violation"
+else
+  bad "either allowed (rc=$RC), or misreported the guard's rc=2 as a FORK-LOCAL CORE PATCH violation"; dump
+fi
 
 echo "-- fork destination: allowed, even though the (stubbed) guard would refuse"
 for url in "git@github.com:aRustyDev/AFFiNE.git" \
@@ -104,7 +187,11 @@ done
 # Asserted here so nobody "fixes" the match into something looser later.
 echo "-- an unrelated owner containing the needle as a substring: still routed through the guard (fail-closed, harmless)"
 WOVEN_GUARD="$STUB_VIOLATION" run_hook "origin" "https://github.com/notoeverything/AFFiNE.git"
-if [ "$RC" -ne 0 ]; then ok "refused notoeverything/AFFiNE (guard was invoked and reported a violation)"; else bad "allowed — the substring match got loosened, or the guard was skipped"; dump; fi
+if [ "$RC" -eq 1 ] && has_msg "FORK-LOCAL CORE PATCH"; then
+  ok "refused notoeverything/AFFiNE (guard was invoked and reported a violation)"
+else
+  bad "allowed, or refused for a different reason — the substring match got loosened, or the guard was skipped"; dump
+fi
 
 # The remote's NAME must carry no weight either way.
 echo "-- the remote NAME is not the signal"
@@ -112,31 +199,47 @@ WOVEN_GUARD="$STUB_VIOLATION" run_hook "upstream" "git@github.com:aRustyDev/AFFi
 if [ "$RC" -eq 0 ]; then ok "a remote NAMED upstream pointing at the fork is allowed"; else bad "keyed on the name, not the URL"; dump; fi
 
 WOVEN_GUARD="$STUB_VIOLATION" run_hook "origin" "git@github.com:toeverything/AFFiNE.git"
-if [ "$RC" -ne 0 ]; then ok "a remote NAMED origin pointing at upstream is still refused"; else bad "keyed on the name — an innocuous name let an upstream push skip the check"; dump; fi
+if [ "$RC" -eq 1 ] && has_msg "FORK-LOCAL CORE PATCH"; then
+  ok "a remote NAMED origin pointing at upstream is still refused"
+else
+  bad "keyed on the name — an innocuous name let an upstream push skip the check"; dump
+fi
 
 echo
 echo "-- fail-closed: an empty or missing destination URL refuses rather than allows"
 run_hook "origin" ""
-if [ "$RC" -ne 0 ]; then ok "refused an empty \$2"; else bad "ALLOWED an empty destination — absence read as success"; dump; fi
+if [ "$RC" -eq 2 ] && has_msg "no remote URL supplied"; then
+  ok "refused an empty \$2"
+else
+  bad "did not cleanly refuse an empty \$2 (rc=$RC) — absence read as success"; dump
+fi
 
 run_hook_argv "$REPO_ROOT" "origin"
-if [ "$RC" -ne 0 ]; then ok "refused a missing \$2 (only \$1 supplied)"; else bad "ALLOWED a missing \$2 — absence read as success"; dump; fi
+if [ "$RC" -eq 2 ] && has_msg "no remote URL supplied"; then
+  ok "refused a missing \$2 (only \$1 supplied)"
+else
+  bad "did not cleanly refuse a missing \$2 (rc=$RC) — absence read as success"; dump
+fi
 
 echo "-- fail-closed: an unresolvable repo root refuses rather than allows"
 NOT_A_REPO="$TMPDIR_T/not-a-repo"
 mkdir -p "$NOT_A_REPO"
 run_hook_argv "$NOT_A_REPO" "origin" "https://github.com/aRustyDev/AFFiNE.git"
-if [ "$RC" -ne 0 ]; then ok "refused when git rev-parse --show-toplevel fails"; else bad "ALLOWED outside any git repo — absence read as success"; dump; fi
+if [ "$RC" -eq 2 ] && has_msg "could not resolve the repository root"; then
+  ok "refused when git rev-parse --show-toplevel fails"
+else
+  bad "did not cleanly refuse outside any git repo (rc=$RC) — absence read as success"; dump
+fi
 
 echo "-- fail-closed: a missing baseline file refuses even a fork-bound push"
 SCRATCH_NOBASELINE="$TMPDIR_T/scratch-nobaseline"
 mkdir -p "$SCRATCH_NOBASELINE"
 ( cd "$SCRATCH_NOBASELINE" && git init -q )
 run_hook_argv "$SCRATCH_NOBASELINE" "origin" "https://github.com/aRustyDev/AFFiNE.git"
-if [ "$RC" -ne 0 ]; then
+if [ "$RC" -eq 2 ] && has_msg "baseline file missing"; then
   ok "refused with no scripts/woven-upstream-baseline present"
 else
-  bad "ALLOWED with no baseline file — cannot have ruled out upstream without it"; dump
+  bad "did not cleanly refuse with no baseline file (rc=$RC) — cannot have ruled out upstream without it"; dump
 fi
 
 echo "-- fail-closed: a baseline with no UPSTREAM_REPO line refuses"
@@ -145,34 +248,114 @@ mkdir -p "$SCRATCH_NOREPO/scripts"
 ( cd "$SCRATCH_NOREPO" && git init -q )
 printf 'UPSTREAM_COMMIT=deadbeef\n' > "$SCRATCH_NOREPO/scripts/woven-upstream-baseline"
 run_hook_argv "$SCRATCH_NOREPO" "origin" "https://github.com/aRustyDev/AFFiNE.git"
-if [ "$RC" -ne 0 ]; then
+if [ "$RC" -eq 2 ] && has_msg "UPSTREAM_REPO not found or empty"; then
   ok "refused with UPSTREAM_REPO absent from the baseline"
 else
-  bad "ALLOWED with UPSTREAM_REPO unreadable — cannot have ruled out upstream without it"; dump
+  bad "did not cleanly refuse with UPSTREAM_REPO unreadable (rc=$RC) — cannot have ruled out upstream without it"; dump
 fi
 
-echo "-- fail-closed: a missing/non-executable guard refuses an upstream-bound push"
+# The mutation this fixture exists to catch: a NAIVE `-z` check on the parsed
+# value treats "toeverything/AFFiNE " (one trailing space) as a valid,
+# non-empty needle. It IS non-empty — it simply then matches no real URL, so
+# an actual push to actual upstream falls through to the default case and
+# exits 0 with no output at all. Verified BEFORE the trim/validate fix landed:
+# this exact fixture failed (rc=0, empty $OUT) against that version of the
+# hook.
+echo "-- fail-closed: a trailing space in UPSTREAM_REPO no longer disables the match"
+SCRATCH_TRAILSPACE="$TMPDIR_T/scratch-trailspace"
+mkdir -p "$SCRATCH_TRAILSPACE/scripts"
+( cd "$SCRATCH_TRAILSPACE" && git init -q )
+printf 'UPSTREAM_COMMIT=deadbeef\nUPSTREAM_REPO=toeverything/AFFiNE \n' > "$SCRATCH_TRAILSPACE/scripts/woven-upstream-baseline"
+WOVEN_GUARD="$STUB_VIOLATION" run_hook_argv "$SCRATCH_TRAILSPACE" "origin" "https://github.com/toeverything/AFFiNE.git"
+if [ "$RC" -eq 1 ] && has_msg "FORK-LOCAL CORE PATCH"; then
+  ok "a trailing space on the UPSTREAM_REPO line still matches upstream and is refused"
+else
+  bad "a trailing space silently disabled the match (rc=$RC) — this is the leak the review caught"; dump
+fi
+
+echo "-- fail-closed: a malformed (non owner/repo) UPSTREAM_REPO value refuses rather than guessing"
+for bad_value in "toeverything" "toeverything/AFFiNE/extra" "toeverything AFFiNE" ""; do
+  SCRATCH_MALFORMED="$TMPDIR_T/scratch-malformed-$(printf '%s' "$bad_value" | tr -c 'A-Za-z0-9' '_')"
+  mkdir -p "$SCRATCH_MALFORMED/scripts"
+  ( cd "$SCRATCH_MALFORMED" && git init -q )
+  printf 'UPSTREAM_COMMIT=deadbeef\nUPSTREAM_REPO=%s\n' "$bad_value" > "$SCRATCH_MALFORMED/scripts/woven-upstream-baseline"
+  run_hook_argv "$SCRATCH_MALFORMED" "origin" "https://github.com/toeverything/AFFiNE.git"
+  if [ "$RC" -eq 2 ] && { has_msg "does not look like owner/repo" || has_msg "UPSTREAM_REPO not found or empty"; }; then
+    ok "refused UPSTREAM_REPO='$bad_value'"
+  else
+    bad "did not cleanly refuse UPSTREAM_REPO='$bad_value' (rc=$RC)"; dump
+  fi
+done
+
+echo "-- fail-closed: a destination URL that normalises to nothing refuses rather than guessing"
+run_hook "origin" ".git"
+if [ "$RC" -eq 2 ] && has_msg "could not normalise the destination URL"; then
+  ok "refused a URL that strips down to an empty haystack"
+else
+  bad "did not cleanly refuse an unnormalisable URL (rc=$RC)"; dump
+fi
+
+echo "-- fail-closed: a missing guard refuses an upstream-bound push"
 WOVEN_GUARD="$TMPDIR_T/does-not-exist.sh" run_hook "origin" "https://github.com/toeverything/AFFiNE.git"
-if [ "$RC" -ne 0 ]; then
+if [ "$RC" -eq 2 ] && has_msg "guard not found or not executable"; then
   ok "refused when the guard binary is missing"
 else
-  bad "ALLOWED an upstream push with no guard to check it — absence read as success"; dump
+  bad "did not cleanly refuse with no guard to check it (rc=$RC) — absence read as success"; dump
 fi
 
-# A guard path that exists but is not a runnable program: on this host,
-# creating a file without the execute bit is not reliable (NTFS/MSYS report
-# nearly everything as "executable" regardless of chmod — verified by hand),
-# so this exercises the same fail-closed outcome from the other direction: a
-# guard the hook cannot successfully run must still refuse, whether the `-x`
-# pre-check catches it or the invocation itself fails.
-UNRUNNABLE_GUARD="$TMPDIR_T/unrunnable-guard.sh"
-printf 'this is not a valid shebang or script\n' > "$UNRUNNABLE_GUARD"
-WOVEN_GUARD="$UNRUNNABLE_GUARD" run_hook "origin" "https://github.com/toeverything/AFFiNE.git"
-if [ "$RC" -ne 0 ]; then
-  ok "refused when the guard exists but cannot be run"
+echo "-- fail-closed: a present but non-executable guard refuses an upstream-bound push"
+if chmod_enforces_no_x; then
+  NONEXEC_GUARD="$TMPDIR_T/nonexec-guard.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NONEXEC_GUARD"
+  chmod 644 "$NONEXEC_GUARD"
+  WOVEN_GUARD="$NONEXEC_GUARD" run_hook "origin" "https://github.com/toeverything/AFFiNE.git"
+  if [ "$RC" -eq 2 ] && has_msg "guard not found or not executable"; then
+    ok "refused via the -x check when the guard lacks the execute bit"
+  else
+    bad "did not refuse via the -x check for a non-executable guard (rc=$RC)"; dump
+  fi
 else
-  bad "ALLOWED an upstream push with a guard that cannot actually run"; dump
+  echo "   (skipped: this filesystem does not clear [ -x ] via chmod 644 — verified at runtime; ubuntu-latest CI does not skip this)"
 fi
+
+# A guard that IS reported executable by `[ -x ]` but fails when actually run
+# (garbage content, no valid shebang) must land in the guard_rc dispatch's
+# fallback branch, not be misreported as a FORK-LOCAL CORE PATCH. Gated on
+# chmod_grants_x for the same reason the fixture above is gated on
+# chmod_enforces_no_x: without a working +x, this file never gets past the
+# hook's own -x check, and the fixture would then be asserting the WRONG
+# check fired instead of testing what it names.
+echo "-- fail-closed: a guard that exists, passes -x, but cannot actually run"
+if chmod_grants_x; then
+  UNRUNNABLE_GUARD="$TMPDIR_T/unrunnable-guard.sh"
+  printf 'this is not a valid shebang or script\n' > "$UNRUNNABLE_GUARD"
+  chmod +x "$UNRUNNABLE_GUARD"
+  WOVEN_GUARD="$UNRUNNABLE_GUARD" run_hook "origin" "https://github.com/toeverything/AFFiNE.git"
+  if [ "$RC" -eq 2 ] && has_msg "the guard could not judge this branch" && ! has_msg "FORK-LOCAL CORE PATCH"; then
+    ok "refused via the guard_rc dispatch fallback, not misreported as a policy violation"
+  else
+    bad "did not cleanly refuse a guard that cannot run (rc=$RC)"; dump
+  fi
+else
+  echo "   (skipped: this filesystem did not honor chmod +x for a fresh file — verified at runtime; ubuntu-latest CI does not skip this)"
+fi
+
+echo
+echo "-- -e parity: husky invokes this hook as \`sh -e\` — the same cases must behave identically under it"
+STRICT_FAIL=0
+for url in "https://github.com/toeverything/AFFiNE.git" "https://github.com/toeverything/AFFiNE.git/"; do
+  WOVEN_GUARD="$STUB_VIOLATION" run_hook_strict "origin" "$url"
+  if [ "$RC" -eq 1 ] && has_msg "FORK-LOCAL CORE PATCH"; then :; else STRICT_FAIL=1; bad "sh -e: $url not refused correctly (rc=$RC)"; dump; fi
+done
+for url in "https://github.com/aRustyDev/AFFiNE.git"; do
+  WOVEN_GUARD="$STUB_VIOLATION" run_hook_strict "origin" "$url"
+  if [ "$RC" -eq 0 ]; then :; else STRICT_FAIL=1; bad "sh -e: $url not allowed correctly (rc=$RC)"; dump; fi
+done
+run_hook_strict "origin" ""
+if [ "$RC" -eq 2 ] && has_msg "no remote URL supplied"; then :; else STRICT_FAIL=1; bad "sh -e: empty \$2 not refused correctly (rc=$RC)"; dump; fi
+( cd "$NOT_A_REPO" && sh -e "$HOOK" "origin" "https://github.com/aRustyDev/AFFiNE.git" >"$OUT" 2>&1 </dev/null ); RC=$?
+if [ "$RC" -eq 2 ] && has_msg "could not resolve the repository root"; then :; else STRICT_FAIL=1; bad "sh -e: unresolvable repo root not refused correctly (rc=$RC)"; dump; fi
+if [ "$STRICT_FAIL" -eq 0 ]; then ok "all of the above behave identically under sh -e"; fi
 
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
