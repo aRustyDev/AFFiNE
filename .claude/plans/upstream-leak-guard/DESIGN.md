@@ -81,8 +81,8 @@ available to this design.
 | Layer           | Mechanism                                         | Catches                                                 | Fails when                           |
 | --------------- | ------------------------------------------------- | ------------------------------------------------------- | ------------------------------------ |
 | 1. Prevention   | `scripts/woven-upstream-branch.sh`                | the branch never contains a fork-local patch            | the branch is made by hand instead   |
-| 2. Interception | `.husky/pre-push`                                 | any push whose destination is upstream, any branch name | `--no-verify`, or hooks not wired up |
-| 3. Backstop     | `woven-manifest-guard.yml`, push to `upstream/**` | a push the hook did not see                             | the branch prefix is not used        |
+| 2. Interception | `.husky/pre-push`                                 | any push to upstream, **or of an `upstream/**` branch anywhere** | `--no-verify`, or hooks not wired up |
+| 3. Backstop     | `woven-manifest-guard.yml`, push to `upstream/**` | a hand-made `upstream/**` branch — **not** a prepared one, which does not carry the workflow | the branch prefix is not used        |
 
 Each layer covers the previous layer's failure mode. All three call the same
 engine, so there is one definition of "is this a leak".
@@ -240,8 +240,51 @@ Two decisions:
   tip to `UPSTREAM_COMMIT` is the comparison the engine already makes and avoids
   that edge case entirely.
 
+**The hook also fires on branch-name intent, not only on destination.** A branch
+named `upstream/**` declares where it is headed, so pushing one *anywhere* runs
+the guard. This is not belt-and-braces; it is the only thing covering the most
+likely real flow. Nobody pushes straight to `toeverything/AFFiNE` — they
+`git push origin upstream/foo` and open a cross-fork PR, and on that push the
+destination is the fork, so a destination-only check exits 0. See "Why layer 3
+cannot cover the prepared branch" below for why layer 2 has to carry this.
+
 The hook is a seatbelt, not a lock: `git push --no-verify` walks past it. That is
-accepted, and is why layer 3 exists.
+accepted.
+
+### Why layer 3 cannot cover the prepared branch
+
+**For `push` events GitHub reads the workflow definition from the pushed
+commit.** A branch built by `woven-upstream-branch.sh` starts at
+`UPSTREAM_COMMIT` and carries only the files you name, so it contains neither
+`.github/workflows/woven-manifest-guard.yml` nor `scripts/woven-manifest-guard.sh`
+— neither exists at the baseline. Pushing such a branch produces **no workflow
+run at all**. Not a red one. None.
+
+So layer 3 fires only on an `upstream/**` branch that descends from `woven/main`
+— a hand-made branch, which is the case layer 1 exists to eliminate.
+
+Walk the scenario this design names as layer 3's reason for existing: prepare a
+clean branch with the tool, then `git cherry-pick` a commit from `woven/main`
+that touches `oidc.ts`. Layer 1's verdict is stale by construction. Layer 2, if
+it keyed only on destination, sees a push to the fork and allows it. Layer 3 does
+not exist on that ref. Three layers, zero checks.
+
+That is why layer 2 keys on the branch name as well. Push time is the last moment
+the code is still on the developer's machine and the only point where every
+prepared branch is observable.
+
+**What each layer actually covers, stated honestly:**
+
+| | prepared branch (`woven-upstream-branch.sh`) | hand-made branch off `woven/main` |
+| --- | --- | --- |
+| 1. preparer | clean at creation; stale after any later commit | not involved |
+| 2. pre-push | **covers it** — via the `upstream/**` name | covers it — via name or destination |
+| 3. CI | **cannot run** — the workflow is not on the branch | covers it |
+
+Layer 3 is therefore the backstop for the *hand-made* case, not for the prepared
+one. Carrying the guard into the prepared branch would fix that, but the files
+would then appear in the upstream PR — which is precisely what this whole design
+exists to prevent.
 
 ## Layer 3 — `woven-manifest-guard.yml`
 
