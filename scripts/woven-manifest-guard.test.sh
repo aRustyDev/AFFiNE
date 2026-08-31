@@ -152,6 +152,15 @@ run_guard --outbound --head HEAD
 if [ "$RC" -ne 2 ]; then ok "--outbound accepted (exit $RC, not a usage error)"
 else bad "--outbound rejected as a usage error"; dump; fi
 
+# --- 8. fail closed: an unrecognised category is an ENVIRONMENT error --------
+# Never "assume ADDITIVE". A typo in column 2 must not silently open the gate —
+# that is the one parsing bug that would be both invisible and catastrophic.
+echo "-- fail closed: garbage category exits 2, not 0 or 1"
+sed 's|\*\*FORK-LOCAL CORE PATCH\*\*|**FORK LOCAL CORE PATCH**|' "$MANIFEST" >"$TMPDIR_T/m-badcat.md"
+run_guard --outbound --manifest "$TMPDIR_T/m-badcat.md" --head HEAD
+expect_rc 2 "environment error"
+expect_names "$OIDC_PATH"
+
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

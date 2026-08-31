@@ -117,14 +117,43 @@ manifest_rows() {
     insec && /^#+[[:space:]]/                      { insec = 0 }
     insec && /^[[:space:]]*\|/ {
       n = split($0, f, "|")
-      if (n < 2) next
-      if (match(f[2], /`[^`]+`/)) print substr(f[2], RSTART + 1, RLENGTH - 2)
+      if (n < 3) next
+      if (!match(f[2], /`[^`]+`/)) next
+      path = substr(f[2], RSTART + 1, RLENGTH - 2)
+      cat = f[3]
+      gsub(/[*`]/, "", cat)                 # drop markdown emphasis
+      sub(/^[[:space:]]+/, "", cat)
+      sub(/[[:space:]]+$/, "", cat)
+      print path "\t" cat
     }
   ' "$MANIFEST"
 }
 
-MANIFESTED="$(manifest_rows | sed 's#^\./##' | sed '/^$/d' | sort -u)"
+MANIFESTED="$(manifest_rows | cut -f1 | sed 's#^\./##' | sed '/^$/d' | sort -u)"
 [ -n "$MANIFESTED" ] || warn "the manifest table lists no files — is the '## Diverged upstream-owned files' heading intact?"
+
+# ---- classify the manifest rows by category --------------------------------
+# Column 2 is the FORK-LOCAL CORE PATCH / ADDITIVE distinction from affine-cm9.
+# An unrecognised value exits 2 in BOTH directions: it is a broken manifest, not
+# a policy violation, and guessing "probably additive" is how a leak ships.
+FORKLOCAL=""
+BADCAT=""
+while IFS="$(printf '\t')" read -r p c; do
+  [ -n "$p" ] || continue
+  case "$c" in
+    "FORK-LOCAL CORE PATCH") FORKLOCAL="${FORKLOCAL}${p}"$'\n' ;;
+    "ADDITIVE")              : ;;
+    *)                       BADCAT="${BADCAT}${p}  [category: ${c:-<empty>}]"$'\n' ;;
+  esac
+done <<< "$(manifest_rows | sed 's#^\./##')"
+
+if [ -n "$BADCAT" ]; then
+  err "manifest row(s) with an unrecognised category — refusing to guess:"
+  while IFS= read -r l; do [ -n "$l" ] && err "    $l"; done <<< "$BADCAT"
+  err "  Column 2 must be exactly **ADDITIVE** or **FORK-LOCAL CORE PATCH**."
+  exit 2
+fi
+FORKLOCAL="$(printf '%s' "$FORKLOCAL" | sed '/^$/d' | sort -u)"
 
 # ---- classify the divergence ----------------------------------------------
 # In worktree mode diff the baseline against the working tree. Untracked files
