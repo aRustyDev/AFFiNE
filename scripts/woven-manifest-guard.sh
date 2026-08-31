@@ -174,20 +174,18 @@ UNPARSED="$(printf '%s\n' "$UNPARSED_RAW" | cut -f2-)"
 # An unrecognised value exits 2 in BOTH directions: it is a broken manifest, not
 # a policy violation, and guessing "probably additive" is how a leak ships.
 #
-# CLASSIFIED is built inside the SAME case dispatch that populates FORKLOCAL,
-# not derived from it afterwards — this is what makes --dump-rows able to
-# observe a bug in the dispatch itself (e.g. the FORK-LOCAL CORE PATCH and
-# ADDITIVE arms swapped) rather than only a bug in how the manifest was typed.
-# FORKLOCAL stays write-only here: nothing below this block reads it. It exists
-# for Task 3's outbound policy to consume; dumping rows makes no policy call.
-FORKLOCAL=""
+# CLASSIFIED is built inside this case dispatch and is exactly what --dump-rows
+# prints. FORKLOCAL is DERIVED from CLASSIFIED below rather than built alongside
+# it — this is what makes --dump-rows able to observe a bug anywhere in this
+# block (a swapped case arm, or a divergent second read of the classification),
+# not just a bug in how the manifest was typed: the value an operator can
+# inspect and the value the guard acts on are now the same value.
 BADCAT=""
 CLASSIFIED=""
 while IFS=$'\t' read -r p c; do
   [ -n "$p" ] || continue
   case "$c" in
     "FORK-LOCAL CORE PATCH")
-      FORKLOCAL="${FORKLOCAL}${p}"$'\n'
       CLASSIFIED="${CLASSIFIED}${p}"$'\t'"FORK-LOCAL CORE PATCH"$'\n'
       ;;
     "ADDITIVE")
@@ -199,7 +197,13 @@ while IFS=$'\t' read -r p c; do
       ;;
   esac
 done <<< "$(printf '%s\n' "$ROWS" | grep -v '^!UNPARSED')"
-FORKLOCAL="$(printf '%s' "$FORKLOCAL" | sed '/^$/d' | sort -u)"
+
+# FORKLOCAL is DERIVED from CLASSIFIED — the same value --dump-rows prints — so
+# the list this guard acts on is the list an operator can inspect. Building the
+# two in parallel would let them drift, and a fixture over the dump could not
+# see it. Exact field match, never a substring: a marker line must not be
+# mistaken for a classification.
+FORKLOCAL="$(printf '%s' "$CLASSIFIED" | awk -F'\t' '$2=="FORK-LOCAL CORE PATCH"{print $1}' | sort -u)"
 
 # ---- --dump-rows: debugging aid, not a check -------------------------------
 # Prints what the parser AND the classifier saw — `path<TAB>category` per row,
@@ -271,6 +275,49 @@ log "${n_changed} changed vs baseline · ${n_upstream} upstream-owned · ${n_row
 # ---- check 1: unmanifested upstream-owned divergence -----------------------
 UNMANIFESTED="$(comm -23 <(printf '%s\n' "$UPSTREAM_OWNED" | sed '/^$/d') \
                          <(printf '%s\n' "$MANIFESTED"     | sed '/^$/d'))"
+
+# ---- OUTBOUND mode: don't leak a fork patch to upstream --------------------
+# Asks an ADDITIONAL question to the inbound one, over the same inputs: not just
+# "is this divergence declared?" but "is this change set carrying something
+# marked NEVER-upstream?".
+#
+# The unmanifested check runs FIRST and is fatal here too. FORKLOCAL is derived
+# from the manifest, so a row the parser cannot read silently leaves the set, and
+# an empty set looks exactly like "nothing to leak". An unreadable row makes its
+# file unmanifested, so gating on that makes every parser gap fail closed —
+# including shapes nobody anticipated. It also means the two checks can never
+# disagree: a branch cannot be "safe to send upstream" while carrying a
+# divergence the fork has not declared.
+#
+# LEAKED is compared against CHANGED rather than UPSTREAM_OWNED because that is
+# the honest question — though a FORK-LOCAL row is upstream-owned by
+# construction, so in practice the two agree.
+if [ "$OUTBOUND" -eq 1 ]; then
+  if [ -n "$UNMANIFESTED" ]; then
+    err "cannot judge this change set: upstream-owned file(s) with no manifest row:"
+    while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$UNMANIFESTED"
+    err ""
+    err "  An undeclared divergence has no category, so it cannot be cleared for"
+    err "  upstream. Add a row to ${MANIFEST#"$REPO_ROOT/"} — or revert the change."
+    exit 1
+  fi
+  LEAKED="$(comm -12 <(printf '%s\n' "$CHANGED"   | sed 's#^\./##' | sed '/^$/d' | sort -u) \
+                     <(printf '%s\n' "$FORKLOCAL" | sed '/^$/d' | sort -u))"
+  if [ -n "$LEAKED" ]; then
+    err "FORK-LOCAL CORE PATCH on an upstream-directed change set:"
+    while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$LEAKED"
+    err ""
+    err "  These files change upstream behaviour and must NEVER reach upstream (affine-cm9)."
+    err "  This branch is not safe to send to the upstream repository."
+    err "  Start an upstream-bound branch from the upstream baseline instead:"
+    err "    scripts/woven-upstream-branch.sh <name> <path>..."
+    err "  There is no override. If a category is genuinely wrong, change the"
+    err "  manifest row in a reviewed commit."
+    exit 1
+  fi
+  ok "no FORK-LOCAL CORE PATCH in this change set — safe to send upstream."
+  exit 0
+fi
 
 # ---- check 2: rows whose path is gone from the tree ------------------------
 STALE=""

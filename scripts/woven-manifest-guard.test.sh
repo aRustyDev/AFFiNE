@@ -216,6 +216,31 @@ else
   dump
 fi
 
+# --- 9. the leak: a branch off woven/main carries the core auth patch --------
+# HEAD descends from woven/main, so oidc.ts diverges from the baseline. That is
+# exactly the branch someone would cut to upstream a small additive fix.
+echo "-- outbound: HEAD carries a FORK-LOCAL CORE PATCH"
+run_guard --outbound --head HEAD
+expect_rc 1 "policy violation"
+expect_names "$OIDC_PATH"
+
+# --- 10. ADDITIVE rows must NOT trip it --------------------------------------
+# The fixture that catches a parser reading the wrong column: seed/index.ts and
+# build-test.yml also diverge from the baseline, and both are ADDITIVE.
+echo "-- outbound: ADDITIVE divergence is not a leak"
+grep -qF -- "$SEED_PATH" "$OUT" && bad "outbound named an ADDITIVE file: $SEED_PATH" || ok "ADDITIVE $SEED_PATH not named"
+grep -qF -- ".github/workflows/build-test.yml" "$OUT" && bad "outbound named an ADDITIVE file: build-test.yml" || ok "ADDITIVE build-test.yml not named"
+
+# --- 9b. outbound refuses to judge an undeclared divergence ------------------
+# Not a duplicate of the inbound unmanifested fixture: it pins the ORDERING.
+# If outbound consulted FORKLOCAL first, a manifest row that failed to parse
+# would drop its file out of the set and the leak check would pass vacuously.
+echo "-- outbound: an unmanifested upstream-owned file is not judgeable"
+grep -v -- "providers/oidc.ts" "$MANIFEST" >"$TMPDIR_T/m-nooidc.md"
+run_guard --outbound --manifest "$TMPDIR_T/m-nooidc.md" --head HEAD
+expect_rc 1 "policy violation"
+expect_names "$OIDC_PATH"
+
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]
