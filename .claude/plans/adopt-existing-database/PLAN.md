@@ -223,6 +223,13 @@ test('splitStatements reports the line each statement starts on', t => {
 // --- corpus anchors and totals, measured in grounding G2a -------------------
 // These are the regression fixtures the tiering exists for. Do not soften them
 // to make a rule-set change pass; if a number here moves, re-measure and say so.
+//
+// 17/14/86 as of the quoted-identifier scrub. The earlier 18/14/85 included a
+// false-positive BLOCKING on 20250203142831_standardize_features, where
+// `retype-column` matched the quoted column name "type" in
+// `ALTER COLUMN "type" SET DEFAULT 0` rather than a real TYPE keyword. That
+// migration is purely additive, so EXPAND is correct. The fixture moved because
+// a false positive was removed, NOT because the assertion was relaxed.
 
 const MIGRATIONS_DIR = join(import.meta.dirname, '../../../../migrations');
 
@@ -232,7 +239,7 @@ const corpus = () =>
     .map(d => d.name)
     .sort();
 
-test('corpus tiers exactly as measured: 18 / 14 / 85 of 117', t => {
+test('corpus tiers exactly as measured: 17 / 14 / 86 of 117', t => {
   const counts = { BLOCKING: 0, DESTRUCTIVE: 0, EXPAND: 0 };
   for (const name of corpus()) {
     const sql = readFileSync(
@@ -241,8 +248,7 @@ test('corpus tiers exactly as measured: 18 / 14 / 85 of 117', t => {
     );
     counts[classifyDdl(sql).tier]++;
   }
-  t.is(counts.BLOCKING + counts.DESTRUCTIVE + counts.EXPAND, 117);
-  t.deepEqual(counts, { BLOCKING: 18, DESTRUCTIVE: 14, EXPAND: 85 });
+  t.deepEqual(counts, { BLOCKING: 17, DESTRUCTIVE: 14, EXPAND: 86 });
 });
 
 test('anchor: drop_legacy_permission_and_subscription is BLOCKING', t => {
@@ -744,6 +750,19 @@ test('DB_BEHIND with only additive pending keeps rollback possible', t => {
   t.true(report.rollbackPossible);
 });
 
+test('an UNREADABLE pending migration fails closed, not open', t => {
+  const report = buildReport({
+    ...base,
+    migrations: { ...base.migrations!, sql: () => null },
+    appliedRows: [{ name: 'm1', finishedAt: new Date(), rolledBackAt: null }],
+  });
+  t.is(report.verdict, 'DB_BEHIND');
+  t.is(report.pending[0].tier, 'BLOCKING');
+  t.is(report.pending[0].hits[0].rule, 'unreadable-migration');
+  // The whole point: a migration we cannot read must never report as safe.
+  t.false(report.rollbackPossible);
+});
+
 test('DB_AHEAD when the database has migrations this binary lacks', t => {
   const report = buildReport({
     ...base,
@@ -1017,7 +1036,29 @@ export function buildReport(input: CompatInput): CompatReport {
 
   const pending: PendingMigration[] = migrations
     ? behind.map(name => {
-        const { tier, hits } = classifyDdl(migrations.sql(name));
+        const sql = migrations.sql(name);
+
+        // `sql()` returns null when the file is absent or unreadable. Fail
+        // CLOSED: a migration we cannot read must not be reported as additive,
+        // which is what treating it as an empty string would do. `classifyDdl`
+        // applies the same rule to SQL it cannot parse (its `unterminated`
+        // flag forces BLOCKING), so both unreadable cases gate consistently.
+        if (sql === null) {
+          return {
+            name,
+            tier: 'BLOCKING' as const,
+            hits: [
+              {
+                tier: 'BLOCKING' as const,
+                rule: 'unreadable-migration',
+                line: 0,
+                statement: `${name}/migration.sql is missing or unreadable`,
+              },
+            ],
+          };
+        }
+
+        const { tier, hits } = classifyDdl(sql);
         return { name, tier, hits };
       })
     : [];
@@ -1106,7 +1147,7 @@ export function buildReport(input: CompatInput): CompatReport {
 
 Run: `yarn affine @affine/server test src/core/db-compat/__tests__/compat.spec.ts`
 
-Expected: PASS, 13 tests.
+Expected: PASS, 14 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1963,6 +2004,28 @@ test('states when identity is unchecked', t => {
   const text = renderReport(report({}));
   t.regex(text, /identity:\s+not stamped/);
 });
+
+test('a long statement is excerpted and says how much was dropped', t => {
+  const long = `ALTER TABLE "t" ${'DROP COLUMN "c", '.repeat(40)}DROP COLUMN "last"`;
+  const text = renderReport(
+    report({
+      verdict: 'DB_BEHIND',
+      rollbackPossible: false,
+      pending: [
+        {
+          name: 'm2',
+          tier: 'BLOCKING',
+          hits: [
+            { tier: 'BLOCKING', rule: 'drop-column', line: 3, statement: long },
+          ],
+        },
+      ],
+    })
+  );
+  t.regex(text, /\+\d+ chars/);
+  // The classifier keeps the full statement; truncation must not be silent.
+  t.false(text.includes(long));
+});
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -1977,6 +2040,25 @@ Replace `packages/backend/server/src/core/db-compat/render.ts` entirely:
 
 ```ts
 import type { CompatReport } from './compat';
+
+const EXCERPT_WIDTH = 160;
+
+/**
+ * Trim a statement for display.
+ *
+ * `DdlHit.statement` carries the FULL collapsed statement — the classifier
+ * deliberately does not truncate, because a blind head-slice can cut off the
+ * very DDL that matched (measured: one corpus migration reports `retype-column`
+ * while its first 160 chars show only `DROP COLUMN`s). Display width is this
+ * module's concern, so keep the head but always say how much was dropped.
+ */
+function excerpt(statement: string): string {
+  if (statement.length <= EXCERPT_WIDTH) {
+    return statement;
+  }
+  const dropped = statement.length - EXCERPT_WIDTH;
+  return `${statement.slice(0, EXCERPT_WIDTH)}… (+${dropped} chars)`;
+}
 
 function rollbackLine(report: CompatReport): string {
   if (report.rollbackPossible === null) {
@@ -2031,7 +2113,7 @@ export function renderReport(report: CompatReport): string {
     for (const item of report.pending) {
       lines.push(`  ${item.tier.padEnd(11)} ${item.name}`);
       for (const hit of item.hits) {
-        lines.push(`    L${hit.line} ${hit.rule}: ${hit.statement}`);
+        lines.push(`    L${hit.line} ${hit.rule}: ${excerpt(hit.statement)}`);
       }
     }
   }
@@ -2044,7 +2126,7 @@ export function renderReport(report: CompatReport): string {
 
 Run: `yarn affine @affine/server test src/core/db-compat/__tests__/render.spec.ts`
 
-Expected: PASS, 4 tests.
+Expected: PASS, 5 tests.
 
 - [ ] **Step 5: Restore the `renderReport` re-export in `index.ts`**
 
@@ -2165,18 +2247,22 @@ dbCommand
 
 - [ ] **Step 7: Verify the CLI end to end against the real database**
 
-Run: `yarn workspace @affine/server build && yarn workspace @affine/server cli db status`
+The `data-migration` script is just `cross-env NODE_ENV=development SERVER_FLAVOR=script r ./src/index.ts`
+— the dev entry point to the same CLI. Its name is historical; it takes any subcommand. Using it
+avoids a full rspack bundle build, which the `cli` script would require.
+
+Run: `yarn workspace @affine/server data-migration db status`
 
 Expected: a report whose verdict is `EQUAL` against a migrated development database, an
 `identity: not stamped` line on first run, and `rollback after applying: POSSIBLE`.
 
-Run: `yarn workspace @affine/server cli db check`
+Run: `yarn workspace @affine/server data-migration db check`
 
 Expected: exit code 0, plus a `ADOPTING pre-existing database (implicit)` warning and a
 `deployment identity minted as <uuid>` warning on the first run only. Confirm the exit code:
 
 ```bash
-yarn workspace @affine/server cli db check; echo "exit=$?"
+yarn workspace @affine/server data-migration db check; echo "exit=$?"
 ```
 
 Run it a second time. Expected: exit 0, and **no** adoption warnings — the stamp now exists, so
@@ -2449,7 +2535,7 @@ psql "postgresql://affine:affine@localhost:5432/affine" -c "INSERT INTO _prisma_
 ```
 
 ```bash
-yarn workspace @affine/server cli db check; echo "exit=$?"
+yarn workspace @affine/server data-migration db check; echo "exit=$?"
 ```
 
 Expected: `exit=1`, a `DB_AHEAD` verdict, and `29990101000000_from_the_future` listed under
@@ -2459,7 +2545,7 @@ Expected: `exit=1`, a `DB_AHEAD` verdict, and `29990101000000_from_the_future` l
 psql "postgresql://affine:affine@localhost:5432/affine" -c "DELETE FROM _prisma_migrations WHERE migration_name = '29990101000000_from_the_future';"
 ```
 
-Expected after cleanup: `yarn workspace @affine/server cli db check` exits 0 again.
+Expected after cleanup: `yarn workspace @affine/server data-migration db check` exits 0 again.
 
 - [ ] **Step 10: Add the two remaining manifest rows**
 
@@ -2509,7 +2595,7 @@ asks for"; this task is what retires the prompt. Replace with:
 2. **Audit incoming migrations for destructive DDL — now mechanical.** Run:
 
    ```bash
-   yarn workspace @affine/server cli db status
+   yarn workspace @affine/server data-migration db status
    ```
 ````
 
@@ -2540,18 +2626,22 @@ Design: `.claude/plans/adopt-existing-database/DESIGN.md`.
 
 ## Operator commands
 
-```bash
-yarn workspace @affine/server cli db status
-````
+Two invocation forms, same CLI:
 
-Reports the verdict, pending migrations by tier, the identity stamp, and `rollback after
-applying:` — `POSSIBLE`, `IMPOSSIBLE` or `UNKNOWN`. Always exits 0. `--json` for machine use.
+| Where                              | Form                                                    |
+| ---------------------------------- | ------------------------------------------------------- |
+| **In the image / a built server**  | `yarn cli db status` (cwd `/app`) — runs `dist/main.js`  |
+| **A source checkout (no bundle)**  | `yarn workspace @affine/server data-migration db status` |
 
-```bash
-yarn workspace @affine/server cli db check
-```
+The `data-migration` script is `cross-env NODE_ENV=development SERVER_FLAVOR=script r ./src/index.ts`
+— the dev entry point to the same CLI. Its name is historical and it accepts any subcommand; use it
+to avoid a full rspack build when auditing a merge locally.
 
-The gate. Exits non-zero with a precise reason. Run automatically by
+`db status` reports the verdict, pending migrations by tier, the identity stamp, and
+`rollback after applying:` — `POSSIBLE`, `IMPOSSIBLE` or `UNKNOWN`. Always exits 0. `--json` for
+machine use.
+
+`db check` is the gate: it exits non-zero with a precise reason, and is run automatically by
 `scripts/self-host-predeploy.js` before any migration.
 
 ## Environment variables
@@ -2589,7 +2679,7 @@ unprotected; a verified-restorable backup is the only net for it.
 
 ```bash
 git add scripts/woven-patch-manifest.md packages/backend/server/src/core/db-compat/README.md && git commit -m "docs(woven): operator docs and mechanical migration audit (affine-tc6.6)"
-````
+```
 
 - [ ] **Step 4: Run the full server lint and the broader suite**
 

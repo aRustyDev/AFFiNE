@@ -55,6 +55,11 @@ single contracting flag is wrong: dropping a foreign key is destructive and an o
 **reads and writes past it without noticing**. Flagging it "rollback impossible" is a false
 alarm.
 
+Scope that claim carefully: "no false positives" holds for **these five naive patterns**. It does
+NOT generalise to the final rule set, which adds `retype-column` — and that rule _did_ produce a
+false positive until quoted identifiers were scrubbed (G2a, G2d). More patterns means more
+detection and more ways to be wrong; each added rule needs its own check.
+
 `20260714000001_drop_legacy_permission_and_subscription` has **15** hits and is the genuine
 `BLOCKING` anchor — and per the bead's 2026-08-31 re-frame it is already shipped inside the
 pinned image, which is why the rollback half of this bead is spent rather than pending.
@@ -62,22 +67,45 @@ pinned image, which is why the rollback half of this bead is spent rather than p
 ### G2a — Measured distribution under the FINAL tiered rule set
 
 A prototype of `classify.ts` (dollar-quote-aware statement splitting, the ten rules in the design's
-tier table) was run over all 117 migrations. **These are the numbers the T1 tests assert:**
+tier table) was run over all 117 migrations. The prototype produced:
 
 ```
 total=117  BLOCKING=18  DESTRUCTIVE=14  EXPAND=85
 ```
+
+> **CORRECTED 2026-09-01 during T1 implementation — the shipped numbers are 17 / 14 / 86.**
+> The prototype's `BLOCKING=18` contained a **false positive**, and this grounding recorded it as
+> measured evidence. `20250203142831_standardize_features` only ADDs columns with defaults, SETs
+> two defaults and CREATEs four indexes, so it is additive; but `retype-column`
+> (`/\bALTER\s+COLUMN\b.*?\bTYPE\b/i`) matched the **quoted column name** `"type"` in
+> `ALTER COLUMN "type" SET DEFAULT 0` rather than a real `TYPE` keyword. The prototype did not
+> scrub double-quoted identifiers, so the literal `"type"` survived into the collapsed statement.
+> The shipped `classify.ts` scrubs quoted identifiers (a fix for the fail-open described in G2d),
+> which removes the spurious match. Re-measured against the shipped classifier:
+>
+> ```
+> total=117  BLOCKING=17  DESTRUCTIVE=14  EXPAND=86
+> ```
+>
+> Exactly one migration changed tier; all four anchors below still hold, and no migration trips
+> the new `unterminated` fail-closed path. **The fixture moved because a false positive was
+> removed, not because the assertion was softened** — a distinction any future reader of a changed
+> fixture needs.
 
 Anchors confirmed: `20260714000001_drop_legacy_permission_and_subscription` → **BLOCKING**
 (`delete-from,drop-table,drop-index,drop-column`); `20260803095500_converge_copilot_runtime` →
 **DESTRUCTIVE**, sole rule `drop-constraint`; `20260712093000_mcp_credentials` → **BLOCKING**
 (`drop-table`).
 
-**Correction to an earlier estimate.** During design this was described as "two migrations whose
-sole hit is `DROP CONSTRAINT`", from a partial spot-check of the naive grep. Measured properly:
-**9 of the 14 `DESTRUCTIVE` migrations carry `drop-constraint` with no blocking rule**, so a
-single-flag scan would falsely report "rollback impossible" for nine migrations, not two. The
-remaining five are `drop-index`-only. This strengthens D4 rather than weakening it.
+**Correction to an earlier estimate, twice over.** During design this was first described as "two
+migrations whose sole hit is `DROP CONSTRAINT`", from a partial spot-check of the naive grep; that
+was then corrected by hand to "nine". Measured mechanically against the shipped classifier:
+**8 of the 14 `DESTRUCTIVE` migrations carry `drop-constraint` with no blocking rule** — the
+remaining six are `drop-index`-only. So a single-flag scan would falsely report "rollback
+impossible" for eight migrations. This still strengthens D4; only the figure was wrong.
+
+The lesson worth keeping: every hand-derived count in this document was wrong at least once. Prefer
+running the classifier over eyeballing grep output.
 
 The tiered set finds 32 migrations with hits versus the naive set's 25 because it adds
 `DROP INDEX` and `DELETE FROM` — both correctly `DESTRUCTIVE`, neither blocking.
@@ -85,7 +113,9 @@ The tiered set finds 32 migrations with hits versus the naive set's 25 because i
 ### G2b — Dollar-quote scrubbing is load-bearing, not defensive
 
 **12 migrations contain `$$`-quoted function bodies.** Running the same prototype with
-dollar-quote handling removed changes three verdicts:
+dollar-quote handling removed changes three verdicts. Both rows below are **prototype** figures,
+so they carry the false-positive `BLOCKING` corrected in G2a — compare the rows to each other, not
+against the shipped 17/14/86:
 
 ```
 with    $$ scrubbing: BLOCKING=18  DESTRUCTIVE=14  EXPAND=85
@@ -100,6 +130,35 @@ of it executed by the migration itself. This confirms the deleted rehearsal scri
 T1 test rather than being left implicit.
 
 Naive `;`-splitting is therefore wrong: a `;` inside `$$ … $$` is not a statement terminator.
+
+### G2d — The scrubber had three fail-open paths (found in T1 code review, fixed)
+
+Probing the T1 classifier with hand-built inputs found defects that the corpus alone could not
+surface. All are fixed in the shipped `classify.ts`; recorded here because each is a trap a future
+edit could reintroduce, and two of them failed **open** — the wrong direction for a safety gate.
+
+| Input                                                         | Old verdict   | Why it was wrong                                                                           |
+| ------------------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------ |
+| `INSERT INTO t VALUES (E'\''); DROP TABLE b;`                 | `EXPAND`      | Backslash escapes in `E'…'` unhandled → quote mis-paired → rest of file blanked            |
+| `ALTER TABLE "user's" ADD COLUMN "a" TEXT; CREATE TABLE b();` | rest blanked  | Double-quoted identifiers were not scrubbed, so an apostrophe inside one derailed the scan |
+| `ALTER INDEX "i" RENAME TO "j";`                              | `BLOCKING`    | `RENAME TO` was unanchored; an index rename is invisible to an older binary — a false gate |
+| `CREATE FUNCTION f() AS $b1$ DROP TABLE x; $b1$ …`            | `BLOCKING`    | Dollar-tag regex excluded digits, so the body went unscrubbed                              |
+| `ALTER TABLE "t" ADD COLUMN "truncate" BOOLEAN;`              | `DESTRUCTIVE` | Bare `TRUNCATE` keyword matched a quoted identifier                                        |
+
+Two structural consequences, both kept:
+
+- **Unparseable SQL now fails closed.** `DdlClassification` carries `unterminated: boolean`; when a
+  block comment, dollar body, string literal or quoted identifier runs to EOF, the tier is forced
+  `BLOCKING` with a synthetic `unparseable` hit. "I lost my place" must never render as "additive".
+  An unterminated `--` line comment is deliberately **not** flagged: a `--` comment reaching EOF
+  without a trailing newline is valid SQL, so flagging it would fire the fail-closed path on
+  well-formed input. Zero corpus migrations trip this path.
+- **`MigrationSet.sql()` returns `string | null`, not `''`.** A migration directory whose
+  `migration.sql` is missing or unreadable previously classified as `EXPAND`. `compat.ts` maps a
+  null to `BLOCKING` with an `unreadable-migration` hit.
+
+Scrubbing quoted identifiers is what corrected the corpus count (see the note in G2a). It is safe
+for detection because every rule matches keywords, never identifiers.
 
 ### G2c — Per-line scanning would be a latent bug
 

@@ -111,17 +111,24 @@ Measured by running a prototype of `classify.ts` over all 117 real migrations (G
 the numbers T1 asserts:**
 
 ```
-total=117  BLOCKING=18  DESTRUCTIVE=14  EXPAND=85
+total=117  BLOCKING=17  DESTRUCTIVE=14  EXPAND=86
 ```
 
-One tier would not be enough: **9 of the 14 `DESTRUCTIVE` migrations carry `drop-constraint` with
+One tier would not be enough: **8 of the 14 `DESTRUCTIVE` migrations carry `drop-constraint` with
 no blocking rule**, and an older binary reads and writes past a dropped foreign key without
-noticing. Reporting those nine as "rollback impossible" would be an alarm that cries wolf, and a
+noticing. Reporting those eight as "rollback impossible" would be an alarm that cries wolf, and a
 gate operators learn to pass with the override flag is not a gate.
 
-Matching is **statement-level and dollar-quote-aware**, not per-line (D4a). Both properties are
-load-bearing, not defensive: scrubbing `$$`-quoted function bodies removes three spurious
-`DESTRUCTIVE` verdicts (G2b), and statement-level matching after whitespace collapse catches a
+These counts were **corrected during T1** from an earlier 18 / 14 / 85: the prototype's extra
+`BLOCKING` was a false positive, where `retype-column` matched the quoted column name `"type"`
+instead of a real `TYPE` keyword. See the correction note in G2a — the fixture moved because a
+false positive was removed, not because the assertion was relaxed.
+
+Matching is **statement-level, dollar-quote-aware, and identifier-aware**, not per-line (D4a). All
+three are load-bearing, not defensive: scrubbing `$$`-quoted function bodies removes spurious
+`DESTRUCTIVE` verdicts (G2b), scrubbing double-quoted identifiers removes the false `BLOCKING`
+above and closes a fail-open where an apostrophe inside an identifier blanked the rest of the file
+(G2d), and statement-level matching after whitespace collapse catches a
 multi-line `ALTER COLUMN "x"` / `SET NOT NULL` that a per-line scan would miss (G2c).
 
 | Tier          | Meaning                                                 | Patterns (indicative)                                                                                           | Gates?        |

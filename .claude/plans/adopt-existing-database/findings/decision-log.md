@@ -32,22 +32,46 @@ calls; D5–D10 follow from them plus the grounding measurements.
   _Status: accepted._
 
 - **D4 — Tiered DDL classification: `BLOCKING` / `DESTRUCTIVE` / `EXPAND`.** Only `BLOCKING`
-  gates. Rationale: measured in G2a — of 117 migrations the final rule set tiers **18 BLOCKING,
-  14 DESTRUCTIVE, 85 EXPAND**, and **9 of the 14 DESTRUCTIVE carry `drop-constraint` with no
-  blocking rule**. A single flag would report "rollback impossible" for those nine, and an alarm
+  gates. Rationale: measured in G2a — of 117 migrations the final rule set tiers **17 BLOCKING,
+  14 DESTRUCTIVE, 86 EXPAND**, and **8 of the 14 DESTRUCTIVE carry `drop-constraint` with no
+  blocking rule**. A single flag would report "rollback impossible" for those eight, and an alarm
   that cries wolf is the one operators learn to pass with the override. The reviewed-exception-file
   variant was rejected as premature: the measurement found no false positives needing one.
   _Status: accepted._
 
-  Corrected during measurement: this was first argued as "two" such migrations, from a partial
-  spot-check of the naive grep. The real figure is nine, which strengthens the decision.
+  The supporting figures were wrong twice before they were right, which is itself worth recording.
+  The "only DROP CONSTRAINT" count went "two" (partial spot-check of a grep) → "nine" (hand count)
+  → **eight** (mechanical count). And the tier totals went 18/14/85 → **17/14/86** once T1's review
+  removed a false-positive `BLOCKING`. The decision never changed; only the evidence for it got
+  more accurate. Do not re-derive these by eye — run the classifier.
 
-- **D4a — Statement-level, dollar-quote-aware scanning (not per-line).** Follows from G2b/G2c.
-  Scrubbing `$$`-quoted bodies is **load-bearing**: without it three migrations gain spurious
-  `DESTRUCTIVE` verdicts from DDL inside function bodies that the migration never executes. And
-  statement-level matching after whitespace collapse guards a latent per-line bug — a multi-line
-  `ALTER COLUMN "x" / SET NOT NULL` would be missed today by a per-line scan, and prisma's
-  formatting could emit one at any time. Both get explicit T1 tests. _Status: accepted._
+- **D4a — Statement-level, dollar-quote-aware, identifier-aware scanning (not per-line).** Follows
+  from G2b/G2c/G2d. Three properties, all load-bearing rather than defensive:
+  1. Scrubbing `$$`-quoted bodies — without it, migrations gain spurious `DESTRUCTIVE` verdicts
+     from DDL inside function bodies the migration never executes.
+  2. Scrubbing **double-quoted identifiers** — without it, `retype-column` matched a column
+     literally named `"type"` (the false `BLOCKING` that made the corpus count 18 instead of 17),
+     and an apostrophe inside an identifier such as `"user's"` blanked the rest of the file,
+     failing OPEN to `EXPAND`. Safe for detection because every rule matches keywords, not
+     identifiers.
+  3. Statement-level matching after whitespace collapse — guards a latent per-line bug, where a
+     multi-line `ALTER COLUMN "x"` / `SET NOT NULL` would be missed. Not in the corpus today, but
+     prisma's formatting could emit one at any time.
+
+  All three carry explicit T1 tests. Property 2 was added during T1 code review, not design.
+  _Status: accepted._
+
+- **D4b — Unparseable input fails CLOSED.** `DdlClassification` carries `unterminated: boolean`;
+  when a block comment, dollar body, string literal or quoted identifier runs to EOF, the tier is
+  forced `BLOCKING` with a synthetic `unparseable` hit. For a gate, "I lost my place" must never
+  render as "additive" — and a migration with an unterminated literal would fail in prisma anyway,
+  so assuming the worst costs nothing real. An unterminated `--` line comment is deliberately
+  exempt: reaching EOF without a trailing newline is valid SQL, so flagging it would fire the
+  fail-closed path on well-formed input. Zero corpus migrations trip this path.
+
+  Same rule for missing files: `MigrationSet.sql()` returns `string | null`, and `compat.ts` maps
+  a null to `BLOCKING` with an `unreadable-migration` hit. Returning `''` would have reported an
+  unreadable migration as additive. _Status: accepted (T1 review)._
 
 - **D5 — Deployment identity is asserted from outside the database, via `AFFINE_DEPLOYMENT_ID`.**
   An id read _out_ of a database cannot tell you it is the wrong database — the check would be
