@@ -79,10 +79,39 @@ corepack yarn workspace @affine/server prisma migrate deploy
 
 Expected: migrations applied, or "No pending migrations to apply."
 
-- [ ] **Step 5: Confirm the untouched upstream spec passes before you change anything**
+- [ ] **Step 5: Build the Rust native module**
+
+`yarn install` does **not** build it, and every server spec needs it — `src/base` reaches
+`src/native.ts` transitively, so even the DB-free unit tests in Task 1 fail without it. The
+symptom is `Cannot find module './server-native.<arch>.node'`.
+
+Requires the Rust toolchain pinned by `rust-toolchain.toml` (**1.97.1** — note the bootstrap's
+toolchain table still says 1.96.0; the pin is authoritative) plus a C/C++ toolchain (MSVC on
+Windows, already present if Visual Studio is installed). If `cargo` is missing, install rustup
+first — `rust-toolchain.toml` then selects the right version automatically.
 
 ```bash
-corepack yarn workspace @affine/server test src/core/quota/__tests__/state.spec.ts
+corepack yarn workspace @affine/server-native build:debug
+```
+
+`build:debug` rather than `build` (which is `--release --strip`): the debug build is
+substantially faster and nothing here depends on native performance. Expected: a
+`server-native.<arch>.node` file appears in `packages/backend/native/`.
+
+```bash
+ls packages/backend/native/*.node
+```
+
+- [ ] **Step 6: Confirm the untouched upstream spec passes before you change anything**
+
+Use `yarn affine`, **not** `yarn workspace`. `"affine": "r affine.ts"` runs through the `r`
+TypeScript loader; invoking AVA via `yarn workspace` bypasses it and fails while loading
+`src/prelude.ts`. AVA reports that as a confusing `Cannot find module
+'…/node_modules/.cache/ava/src/prelude.ts'` — its fallback path masking the real error, not a
+missing file.
+
+```bash
+corepack yarn affine @affine/server test 'src/core/quota/__tests__/state.spec.ts'
 ```
 
 Expected: all tests pass. This spec asserts `memberLimit === 10` for `selfhost_free` at lines
@@ -215,7 +244,7 @@ test('fields the helper does not own are passed through untouched', t => {
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-corepack yarn workspace @affine/server test src/core/quota/__tests__/woven-config.spec.ts
+corepack yarn affine @affine/server test 'src/core/quota/__tests__/woven-config.spec.ts'
 ```
 
 Expected: FAIL — cannot find module `../woven-config`.
@@ -332,7 +361,7 @@ export function applyWovenSelfhostQuota<T extends Floorable>(
 - [ ] **Step 4: Run the test to verify it passes**
 
 ```bash
-corepack yarn workspace @affine/server test src/core/quota/__tests__/woven-config.spec.ts
+corepack yarn affine @affine/server test 'src/core/quota/__tests__/woven-config.spec.ts'
 ```
 
 Expected: 8 tests passed.
@@ -370,7 +399,7 @@ loosens `limitShape` in `woven-config.ts`.
 - [ ] **Step 6: Run the whole quota suite to confirm nothing else moved**
 
 ```bash
-corepack yarn workspace @affine/server test 'src/core/quota/__tests__/*.spec.ts'
+corepack yarn affine @affine/server test 'src/core/quota/__tests__/*.spec.ts'
 ```
 
 Expected: all pass, including the untouched `state.spec.ts`.
@@ -556,7 +585,7 @@ test('seat floor never lowers: a floor of 1 leaves the plan value at 10', async 
 - [ ] **Step 2: Run the test to verify the floor tests fail**
 
 ```bash
-corepack yarn workspace @affine/server test src/core/quota/__tests__/woven-selfhost-quota.spec.ts
+corepack yarn affine @affine/server test 'src/core/quota/__tests__/woven-selfhost-quota.spec.ts'
 ```
 
 Expected: the `default (-1)` test PASSES (that is current upstream behavior), and
@@ -646,7 +675,7 @@ Leave every line below it alone. `storageQuota` (the readonly comparison), `seat
 - [ ] **Step 7: Run the test to verify it passes**
 
 ```bash
-corepack yarn workspace @affine/server test src/core/quota/__tests__/woven-selfhost-quota.spec.ts
+corepack yarn affine @affine/server test 'src/core/quota/__tests__/woven-selfhost-quota.spec.ts'
 ```
 
 Expected: 3 tests passed.
@@ -654,7 +683,7 @@ Expected: 3 tests passed.
 - [ ] **Step 8: Run the untouched upstream spec — this is the real default-behavior guard**
 
 ```bash
-corepack yarn workspace @affine/server test src/core/quota/__tests__/state.spec.ts
+corepack yarn affine @affine/server test 'src/core/quota/__tests__/state.spec.ts'
 ```
 
 Expected: all pass, with no edits to that file. If `memberLimit === 10` at line 309 or 312
@@ -762,7 +791,7 @@ test('blob floor also reaches the calculator the upload path uses', async t => {
 - [ ] **Step 2: Run to verify the floor tests fail before you look for a cause**
 
 ```bash
-corepack yarn workspace @affine/server test src/core/quota/__tests__/woven-selfhost-quota.spec.ts
+corepack yarn affine @affine/server test 'src/core/quota/__tests__/woven-selfhost-quota.spec.ts'
 ```
 
 Expected: if Task 2 is complete these should **pass immediately** — the seam already covers
@@ -822,7 +851,7 @@ test('the user projection is floored too, so it cannot contradict the workspace'
 - [ ] **Step 2: Run the tests**
 
 ```bash
-corepack yarn workspace @affine/server test src/core/quota/__tests__/woven-selfhost-quota.spec.ts
+corepack yarn affine @affine/server test 'src/core/quota/__tests__/woven-selfhost-quota.spec.ts'
 ```
 
 Expected: 9 tests passed. The user-projection test is what Task 2 step 5 exists for — if it
