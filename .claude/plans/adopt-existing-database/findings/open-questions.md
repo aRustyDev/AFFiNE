@@ -1,41 +1,54 @@
 # Open questions — adopt-existing-database
 
-Four questions remain. **None blocks T1–T3**, which are pure-core and DB-state work. OQ-1 must
-be settled before T5 (enforcement) ships; OQ-2 is T6's precondition; OQ-3 and OQ-4 are scope
-decisions that can be deferred without rework.
+Two questions remain open (OQ-3, OQ-4), both scope decisions that can be deferred without
+rework. OQ-1 and OQ-2 were resolved by the operator on 2026-09-01; their reasoning is kept below
+rather than deleted, because both encode a constraint an implementer must respect.
 
-## OQ-1 — Does the boot guard need an emergency bypass? (settle before T5)
+## OQ-1 — RESOLVED 2026-09-01: yes, one boot-only bypass — `AFFINE_DB_COMPAT_SKIP=1`
+
+Accepted as recommended; recorded as **D11**. Binding constraints for T5: the bypass skips the
+**boot guard only, never the predeploy gate**; it logs at **ERROR on every boot** naming the
+verdict it suppressed; and it is documented as an incident tool, not a configuration option, and
+is not rendered by the chart. Original reasoning below.
 
 A guard that refuses to boot is, by construction, a way to take the fleet down. The DB_AHEAD and
 `IDENTITY_MISMATCH` verdicts are conclusive enough that refusing is right — but if the guard
 itself has a bug (a mis-resolved migrations directory, a stamp written with the wrong id), there
-is no way to start the server to fix it.
+is no way to start the server to fix it. The argument against is real: an escape hatch is the
+thing that gets left on. The per-boot ERROR log is what makes it acceptable, and the predeploy
+gate remains unbypassable.
 
-**Recommendation: yes, one env-only bypass — `AFFINE_DB_COMPAT_SKIP=1`** — with these properties:
+## OQ-2 — RESOLVED 2026-09-01: the verification splits; only the CNPG drill waits for T6
 
-- It skips the **boot** guard only, never the predeploy gate. The gate is where the mutation
-  happens and it is already safe to wedge.
-- It logs at ERROR on every boot, naming the verdict it suppressed, so a bypass left on is
-  visible in logs rather than silent.
-- It is documented as an incident tool, not a configuration option, and not rendered by the
-  chart — an operator sets it deliberately via `extraEnv`.
+Accepted; recorded as **D12**. The **local half comes forward into T3/T4** — the ava suite
+asserts verdicts against a database carrying a real `_prisma_migrations` history (not only
+synthetic sets), plus a local rehearsal path that loads a dump into scratch Postgres and runs
+`db status` / `db check`. That is the capability the deleted `woven-migration-rehearsal.sh`
+approximated and the bead's item 2 calls homeless, and it removes most of T6's risk without a
+cluster.
 
-The argument against is real: an escape hatch is the thing that gets left on. The logging
-requirement is what makes it acceptable, and the predeploy gate remains unbypassable.
+Only the **CNPG cluster drill** remains in T6, deliberately later rather than merely deferred:
+the runbook's measured timings make it a real cost, so it should be spent once on shipped
+behaviour; and the remaining sub-question below cannot be answered well until the command exists
+and its exact invocation and output are known.
 
-## OQ-2 — Who runs the restore-drill verification, and against what? (T6 precondition)
+**Verified not to be a discovery risk:** the runbook
+(`infrastructure/docs/src/operations/affine-pg-restore-drill.md`, bead `infra-zptb.6`) exists and
+is thorough — 268 lines, a parameterised procedure, measured timings, a three-way discrimination
+section, a negative control, and a traps section. It recovers into a scratch cluster in the
+`agents` namespace.
+
+**Still open inside T6 (needs an infra-repo owner):**
+
+Whether T6 reuses the `infra-zptb.6` drill procedure as-is against a fresh scratch restore, or
+whether the drill runbook itself gains a step ("bring a server up against the restored database
+and record the verdict"), which would make this a cross-repo deliverable with an infra-side bead.
+The second is more useful long-term — the drill currently proves the _data_ restores but not that
+a _server may adopt it_, which is precisely the gap the bead names.
 
 The bead's acceptance criteria ends "Verified against a database recovered per the infra
-restore-drill runbook" (`infrastructure/docs/src/operations/affine-pg-restore-drill.md`,
-bead `infra-zptb.6`). That is the only part of this work needing an environment outside this
-repo — a CNPG restore into a scratch cluster.
-
-Open: whether T6 reuses the `infra-zptb.6` drill procedure as-is against a fresh scratch
-restore, or whether the drill runbook itself gains a step ("bring a server up against the
-restored database and record the verdict"), which would make this a cross-repo deliverable with
-an infra-side bead. The second is more useful long-term — the drill currently proves the _data_
-restores but not that a _server may adopt it_, which is precisely the gap the bead names — but it
-needs an infra-repo owner.
+restore-drill runbook", so a CNPG restore into a scratch cluster is the one part of this work
+needing an environment outside this repo.
 
 ## OQ-3 — Should `db status` gate CI on PRs that add a BLOCKING migration?
 

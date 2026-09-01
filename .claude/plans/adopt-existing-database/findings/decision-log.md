@@ -32,11 +32,22 @@ calls; D5–D10 follow from them plus the grounding measurements.
   _Status: accepted._
 
 - **D4 — Tiered DDL classification: `BLOCKING` / `DESTRUCTIVE` / `EXPAND`.** Only `BLOCKING`
-  gates. Rationale: measured in G2 — two of the 25 destructive migrations hit only on
-  `DROP CONSTRAINT`, which an older binary survives. A single flag would report "rollback
-  impossible" for those, and an alarm that cries wolf is the one operators learn to pass with
-  the override. The reviewed-exception-file variant was rejected as premature: the measurement
-  found no false positives needing one. _Status: accepted._
+  gates. Rationale: measured in G2a — of 117 migrations the final rule set tiers **18 BLOCKING,
+  14 DESTRUCTIVE, 85 EXPAND**, and **9 of the 14 DESTRUCTIVE carry `drop-constraint` with no
+  blocking rule**. A single flag would report "rollback impossible" for those nine, and an alarm
+  that cries wolf is the one operators learn to pass with the override. The reviewed-exception-file
+  variant was rejected as premature: the measurement found no false positives needing one.
+  _Status: accepted._
+
+  Corrected during measurement: this was first argued as "two" such migrations, from a partial
+  spot-check of the naive grep. The real figure is nine, which strengthens the decision.
+
+- **D4a — Statement-level, dollar-quote-aware scanning (not per-line).** Follows from G2b/G2c.
+  Scrubbing `$$`-quoted bodies is **load-bearing**: without it three migrations gain spurious
+  `DESTRUCTIVE` verdicts from DDL inside function bodies that the migration never executes. And
+  statement-level matching after whitespace collapse guards a latent per-line bug — a multi-line
+  `ALTER COLUMN "x" / SET NOT NULL` would be missed today by a per-line scan, and prisma's
+  formatting could emit one at any time. Both get explicit T1 tests. _Status: accepted._
 
 - **D5 — Deployment identity is asserted from outside the database, via `AFFINE_DEPLOYMENT_ID`.**
   An id read _out_ of a database cannot tell you it is the wrong database — the check would be
@@ -71,6 +82,45 @@ calls; D5–D10 follow from them plus the grounding measurements.
   imports `FunctionalityModules` (G8), so a guard placed there would make `db check` refuse to
   start in exactly the situation the operator needs it — a chicken-and-egg that would leave no
   way to diagnose or adopt. _Status: accepted._
+
+- **D11 — One emergency bypass, `AFFINE_DB_COMPAT_SKIP=1`, boot-only and loudly logged.**
+  Resolves OQ-1. A guard that refuses to boot is by construction a way to take the fleet down,
+  so if the guard itself is wrong (a mis-resolved migrations directory, a stamp written with the
+  wrong id) there must be a way in. Constraints that make it acceptable rather than a hole:
+  it skips the **boot guard only and never the predeploy gate** (the gate is where mutation
+  happens and wedging it is already safe); it logs at **ERROR on every boot**, naming the
+  verdict it suppressed, so a bypass left on is visible rather than silent; and it is documented
+  as an incident tool, not a configuration option — not rendered by the chart, set deliberately
+  via `extraEnv`. The argument against is real (an escape hatch is the thing that gets left on);
+  the per-boot ERROR is what answers it. _Status: accepted 2026-09-01 (operator)._
+
+- **D13 — The three knobs are read from `process.env` directly, NOT via `defineModuleConfig`.**
+  `AFFINE_DEPLOYMENT_ID`, `AFFINE_DB_ADOPT`, `AFFINE_DB_COMPAT_SKIP`. A `defineModuleConfig` item
+  with an `env:` binding is also **overridable from the `app_configs` table**, which for a safety
+  control is backwards: an admin (or a stray row) could set `skip` in the database and disable the
+  guard, and the guard would be reading its own kill switch from the thing it is guarding. Direct
+  env reads also keep the boot guard independent of config load order. Consequence: these knobs do
+  not appear in the admin UI and cannot be changed at runtime — correct for an incident tool.
+  Supersedes the design's earlier description of `AFFINE_DEPLOYMENT_ID` as "a fork-owned config
+  item". _Status: accepted._
+
+- **D14 — Two modules, so the CLI never self-gates.** `DbCompatModule` provides and exports
+  `DbCompatService` only, and is safe to import anywhere including the minimal CLI context.
+  `DbCompatGuardModule` imports it and adds the `OnApplicationBootstrap` guard; **only `AppModule`
+  imports that one.** Implements D10 concretely: a single module carrying both would make
+  `db check` run the guard in its own bootstrap, which is the chicken-and-egg D10 forbids.
+  _Status: accepted._
+
+- **D12 — T6's restore-drill verification splits; the local half comes forward.** The
+  populated-database verification moves into T3/T4, where a real Postgres is already required:
+  the ava suite asserts verdicts against a database carrying a real `_prisma_migrations` history,
+  not only synthetic sets, plus a local rehearsal path (load a dump into scratch Postgres, run
+  `db status` / `db check`) — which is the capability the deleted `woven-migration-rehearsal.sh`
+  approximated and the bead's item 2 calls homeless. Only the **CNPG cluster drill** stays in T6.
+  Rationale: the runbook's measured timings make the drill a real cost, so it should be spent
+  once on shipped behaviour; and OQ-2 (does the runbook gain a "bring a server up against the
+  restored database" step?) cannot be answered well until the command exists and its exact
+  invocation and output are known. _Status: accepted 2026-09-01 (operator)._
 
 ## Rejected approaches
 

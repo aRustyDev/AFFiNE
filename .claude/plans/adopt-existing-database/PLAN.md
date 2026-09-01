@@ -28,8 +28,9 @@ server at the _wrong_ populated database is detected instead of half-migrated.
 | Doc                                                      | What                                                                                                                                      |
 | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | [findings/grounding.md](findings/grounding.md)           | Verified facts, all measured on this tree: deployment topology, migration-corpus scan, `app_configs` namespace hazard, Nest boot ordering |
-| [findings/decision-log.md](findings/decision-log.md)     | D1–D10                                                                                                                                    |
-| [findings/open-questions.md](findings/open-questions.md) | OQ-1 (emergency bypass) … OQ-4 (data migrations)                                                                                          |
+| [findings/decision-log.md](findings/decision-log.md)     | D1–D14, plus D4a                                                                                                                          |
+| [findings/open-questions.md](findings/open-questions.md) | OQ-1, OQ-2 resolved 2026-09-01; OQ-3 (CI gating) and OQ-4 (data migrations) open                                                          |
+| [IMPLEMENTATION.md](IMPLEMENTATION.md)                   | The task-by-task implementation plan derived from this design                                                                             |
 
 ## Why the enforcement point is what it is
 
@@ -62,9 +63,12 @@ row. All judgement sits in the two pure modules.
 | `db-state.ts`      | `_prisma_migrations` via `$queryRaw`: applied / rolled-back / failed / table-absent. | Prisma          |
 | `compat.ts`        | Combine set + state + identity into a `CompatReport` + verdict.                      | pure over above |
 | `identity.ts`      | Read/write the deployment stamp in `app_configs`.                                    | Prisma          |
-| `service.ts`       | Nest injectable: `report()`, `check()`.                                              | above           |
-| `guard.ts`         | `OnApplicationBootstrap` → refuse to listen.                                         | service         |
-| `index.ts`         | `DbCompatModule` + public types.                                                     | —               |
+| `env.ts`           | The three `process.env` reads, in one place (D13).                                   | nothing         |
+| `service.ts`       | `DbCompatService` plus the pure `decide()` adoption gate.                            | above           |
+| `guard.ts`         | `OnApplicationBootstrap` → refuse to listen; pure `enforce()`.                       | service         |
+| `render.ts`        | Format a `CompatReport` as operator-readable text.                                   | nothing (pure)  |
+| `index.ts`         | `DbCompatModule` + `DbCompatGuardModule` + public types (D14).                       | —               |
+| `cli-module.ts`    | `DbCompatCliModule` — the config+prisma-only CLI context (D7).                       | —               |
 
 ## Verdicts
 
@@ -103,11 +107,22 @@ three needs an answer that is neither "adopt" nor a crash.
 
 ## DDL classification (tiers)
 
-Measured on the real corpus: 117 prisma migrations, 25 trip the prior-art destructive pattern
-set, and spot-checking found **no false positives** — they are genuine. But one tier is not
-enough, because two of the 25 hit _only_ on `DROP CONSTRAINT`, which an older binary reads and
-writes past without noticing. Reporting those as "rollback impossible" would be an alarm that
-cries wolf, and a gate operators learn to pass with the override flag is not a gate.
+Measured by running a prototype of `classify.ts` over all 117 real migrations (G2a). **These are
+the numbers T1 asserts:**
+
+```
+total=117  BLOCKING=18  DESTRUCTIVE=14  EXPAND=85
+```
+
+One tier would not be enough: **9 of the 14 `DESTRUCTIVE` migrations carry `drop-constraint` with
+no blocking rule**, and an older binary reads and writes past a dropped foreign key without
+noticing. Reporting those nine as "rollback impossible" would be an alarm that cries wolf, and a
+gate operators learn to pass with the override flag is not a gate.
+
+Matching is **statement-level and dollar-quote-aware**, not per-line (D4a). Both properties are
+load-bearing, not defensive: scrubbing `$$`-quoted function bodies removes three spurious
+`DESTRUCTIVE` verdicts (G2b), and statement-level matching after whitespace collapse catches a
+multi-line `ALTER COLUMN "x"` / `SET NOT NULL` that a per-line scan would miss (G2c).
 
 | Tier          | Meaning                                                 | Patterns (indicative)                                                                                           | Gates?        |
 | ------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------- |
@@ -143,8 +158,11 @@ redesign.
 
 **The ratchet.** A deployment identity must be asserted from **outside** the database or the
 check is circular — an id read _out_ of a database cannot tell you it is the wrong database. So
-identity comes from `AFFINE_DEPLOYMENT_ID`, a fork-owned config item. When it is unset at adopt
-time we mint a UUID, store it, and log:
+identity comes from the `AFFINE_DEPLOYMENT_ID` environment variable, read **directly from
+`process.env`, not through `defineModuleConfig`** (D13): a config item with an `env:` binding is
+also overridable from the `app_configs` table, which would let a database row disable the guard
+that is guarding it. Same for `AFFINE_DB_ADOPT` and `AFFINE_DB_COMPAT_SKIP`. When it is unset at
+adopt time we mint a UUID, store it, and log:
 
 ```
 deployment identity minted as <uuid>; set AFFINE_DEPLOYMENT_ID=<uuid> to enable wrong-database detection
@@ -189,14 +207,36 @@ Payload:
   `runPrismaMigrations()`, shelling out to `yarn cli db check` in the same `execSync` idiom the
   script already uses. Non-zero exit wedges the initContainer.
 
-- **`app.module.ts`**: `DbCompatModule` in **`AppModule` only — never `FunctionalityModules`**.
-  The CLI imports `FunctionalityModules`, so a guard there would make `db check` unable to run
-  in precisely the situation it exists for (D10).
+- **`app.module.ts`**: **two modules** (D14). `DbCompatModule` provides and exports
+  `DbCompatService` only and is safe anywhere, including the minimal CLI context.
+  `DbCompatGuardModule` adds the `OnApplicationBootstrap` guard, and **only `AppModule` imports
+  it — never `FunctionalityModules`**. The CLI imports `FunctionalityModules`, so a guard reachable
+  from there would make `db check` unable to run in precisely the situation it exists for (D10).
+
+  The guard is also **inert under `env.testing`**: seven existing test files import `AppModule`
+  and call `module.init()`, which runs bootstrap hooks. Without the test guard they would each
+  acquire a new database query and a new failure mode.
 
 Verified in the installed `@nestjs/core`: `listen()` calls `init()`, which runs
 `callBootstrapHook()` before `httpAdapter.listen()`. A throw in `onApplicationBootstrap`
 propagates out of `init()`, so the port is never bound — refusal is a real refusal, not a
 window during which the server serves traffic.
+
+## Emergency bypass — `AFFINE_DB_COMPAT_SKIP=1` (D11)
+
+A guard that refuses to boot is by construction a way to take the fleet down, so a guard bug (a
+mis-resolved migrations directory, a stamp written with the wrong id) must not be unrecoverable.
+One bypass exists, and its three constraints are what keep it from being a hole:
+
+- **Boot guard only, never the predeploy gate.** The gate is where mutation happens, and wedging
+  it is already the safe failure.
+- **Logs at ERROR on every boot**, naming the verdict it suppressed. A bypass left on is visible
+  in logs rather than silent.
+- **An incident tool, not a configuration option.** Not rendered by the chart; an operator sets
+  it deliberately via `extraEnv`.
+
+The objection is real — an escape hatch is the thing that gets left on — and the per-boot ERROR
+is the answer to it.
 
 ## Testing
 
@@ -238,17 +278,24 @@ guard". It becomes `yarn cli db status` — this plan converts that prompt into 
   failed-row handling), `compat.ts`, `compat.spec.ts`. Deliverable: every row of the verdict
   table is reachable and tested.
 - **T3 — Identity stamp + adoption gate.** `identity.ts`, `AFFINE_DEPLOYMENT_ID` config item,
-  `service.ts`, adoption decision logic, `db-compat.spec.ts` against real Postgres.
+  `service.ts`, adoption decision logic, `db-compat.spec.ts` against real Postgres — asserting
+  verdicts against a **populated** database carrying a real `_prisma_migrations` history, not
+  only synthetic sets (D12).
 - **T4 — CLI.** `withMinimalApp`, `db status`, `db check --adopt`, `--json`. First manifest row.
-  Deliverable: the bead's third acceptance clause (operator can list pending migrations and see
-  which are contracting) is met and demonstrable.
-- **T5 — Enforcement.** `guard.ts`, `app.module.ts` import, `self-host-predeploy.js` gate.
-  Remaining two manifest rows. Deliverable: acceptance clauses one and two.
-- **T6 — Docs, rewire, verification.** Rewrite `woven-patch-manifest.md` step 2; document
-  `AFFINE_DEPLOYMENT_ID` and `AFFINE_DB_ADOPT`; **verify against a database recovered per the
-  infra restore-drill runbook**
+  Plus the **local rehearsal path**: load a dump into scratch Postgres and run
+  `db status` / `db check` — the capability the deleted `woven-migration-rehearsal.sh`
+  approximated, and the bead's item 2 (D12). Deliverable: the bead's third acceptance clause
+  (operator can list pending migrations and see which are contracting) is met and demonstrable.
+- **T5 — Enforcement.** `guard.ts`, `app.module.ts` import, `self-host-predeploy.js` gate, and
+  the `AFFINE_DB_COMPAT_SKIP=1` boot-only bypass (D11). Remaining two manifest rows.
+  Deliverable: acceptance clauses one and two.
+- **T6 — Docs, rewire, cluster verification.** Rewrite `woven-patch-manifest.md` step 2; document
+  `AFFINE_DEPLOYMENT_ID`, `AFFINE_DB_ADOPT` and `AFFINE_DB_COMPAT_SKIP`; **verify against a
+  database recovered per the infra restore-drill runbook**
   (`infrastructure/docs/src/operations/affine-pg-restore-drill.md`), which is the bead's stated
-  verification condition and the only phase needing an environment outside this repo.
+  verification condition. Per D12 this is now only the **CNPG cluster drill** — the local
+  populated-database verification has moved to T3/T4 — so it is the one phase needing an
+  environment outside this repo, and the one needing an infra-repo owner (OQ-2).
 
 ## Not covered, stated plainly
 

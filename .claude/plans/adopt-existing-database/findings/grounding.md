@@ -53,13 +53,67 @@ Spot-checking the hits found **no false positives** — they are genuine destruc
 So text scanning is sound and needs no reviewed-exception file (yet). But the last row is why a
 single contracting flag is wrong: dropping a foreign key is destructive and an older binary
 **reads and writes past it without noticing**. Flagging it "rollback impossible" is a false
-alarm. `20260803095500_converge_copilot_runtime` is one of only two migrations in the corpus
-whose sole hit is `DROP CONSTRAINT`, which makes it the natural regression fixture for the
-tiering.
+alarm.
 
 `20260714000001_drop_legacy_permission_and_subscription` has **15** hits and is the genuine
 `BLOCKING` anchor — and per the bead's 2026-08-31 re-frame it is already shipped inside the
 pinned image, which is why the rollback half of this bead is spent rather than pending.
+
+### G2a — Measured distribution under the FINAL tiered rule set
+
+A prototype of `classify.ts` (dollar-quote-aware statement splitting, the ten rules in the design's
+tier table) was run over all 117 migrations. **These are the numbers the T1 tests assert:**
+
+```
+total=117  BLOCKING=18  DESTRUCTIVE=14  EXPAND=85
+```
+
+Anchors confirmed: `20260714000001_drop_legacy_permission_and_subscription` → **BLOCKING**
+(`delete-from,drop-table,drop-index,drop-column`); `20260803095500_converge_copilot_runtime` →
+**DESTRUCTIVE**, sole rule `drop-constraint`; `20260712093000_mcp_credentials` → **BLOCKING**
+(`drop-table`).
+
+**Correction to an earlier estimate.** During design this was described as "two migrations whose
+sole hit is `DROP CONSTRAINT`", from a partial spot-check of the naive grep. Measured properly:
+**9 of the 14 `DESTRUCTIVE` migrations carry `drop-constraint` with no blocking rule**, so a
+single-flag scan would falsely report "rollback impossible" for nine migrations, not two. The
+remaining five are `drop-index`-only. This strengthens D4 rather than weakening it.
+
+The tiered set finds 32 migrations with hits versus the naive set's 25 because it adds
+`DROP INDEX` and `DELETE FROM` — both correctly `DESTRUCTIVE`, neither blocking.
+
+### G2b — Dollar-quote scrubbing is load-bearing, not defensive
+
+**12 migrations contain `$$`-quoted function bodies.** Running the same prototype with
+dollar-quote handling removed changes three verdicts:
+
+```
+with    $$ scrubbing: BLOCKING=18  DESTRUCTIVE=14  EXPAND=85
+without $$ scrubbing: BLOCKING=18  DESTRUCTIVE=17  EXPAND=82
+```
+
+The three false positives are `20250521083048_fix_workspace_embedding_chunk_primary_key`
+(`drop-index,drop-constraint`), `20260512133700_workspace_runtime_states` (`delete-from`) and
+`20260514000000_entitlement_quota_states` (`delete-from`) — all DDL inside a function body, none
+of it executed by the migration itself. This confirms the deleted rehearsal script's warning that
+"plain DELETE/TRUNCATE inside trigger/function bodies is NOT flagged", and it earns a dedicated
+T1 test rather than being left implicit.
+
+Naive `;`-splitting is therefore wrong: a `;` inside `$$ … $$` is not a statement terminator.
+
+### G2c — Per-line scanning would be a latent bug
+
+No migration in the corpus currently splits `ALTER COLUMN "x"` from its `SET NOT NULL` across
+lines (checked: zero matches for a line ending in `ALTER COLUMN "…"`). So a per-line scan would
+pass today — but it would silently miss
+
+```sql
+ALTER TABLE "foo" ALTER COLUMN "bar"
+  SET NOT NULL;
+```
+
+which prisma's generated formatting could produce at any time. Statement-level scanning after
+whitespace collapse is what makes the rule set robust, and it costs nothing extra.
 
 ## G3 — `app_configs` is NOT a free-form store, but a `$`-prefixed id is inert
 
