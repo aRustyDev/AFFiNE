@@ -27,6 +27,7 @@ const test = ava.serial as TestFn<Context>;
 
 const INHERIT = -1;
 const ONE_GB = 1024 * 1024 * 1024;
+const ONE_MB = 1024 * 1024;
 
 test.before(async t => {
   const module = await createTestingModule({
@@ -169,5 +170,90 @@ test('a storage floor reaches the persisted user quota projection', async t => {
     });
 
     t.is(row?.storageQuota, BigInt(200 * ONE_GB));
+  });
+});
+
+// The blobs.size column is Postgres `Integer` (32-bit), so a single row cannot hold a
+// 101GB value directly (int32 tops out around 2GB). Split the requested total across
+// multiple <=1GB rows, matching the pattern the upstream-owned state.spec.ts already uses
+// (see its own addBlob loop) to reach multi-GB usage totals. The sum is still exact.
+async function addBlob(
+  t: ExecutionContext<Context>,
+  workspaceId: string,
+  size: number
+) {
+  let remaining = size;
+  while (remaining > 0) {
+    const chunk = Math.min(remaining, ONE_GB);
+    await t.context.models.blob.upsert({
+      workspaceId,
+      key: randomUUID(),
+      mime: 'application/octet-stream',
+      size: chunk,
+    });
+    remaining -= chunk;
+  }
+}
+
+test('default (-1): storage past the plan quota makes the workspace readonly', async t => {
+  await asSelfhosted(async () => {
+    const { workspace } = await createWorkspace(t);
+    await addBlob(t, workspace.id, 101 * ONE_GB);
+
+    const state = await t.context.state.reconcileWorkspaceQuotaState(
+      workspace.id
+    );
+
+    t.is(state.storageQuota, BigInt(100 * ONE_GB));
+    t.true(state.readonlyReasons.includes('storage_overflow'));
+  });
+});
+
+test('storage floor 900GB: the same usage is within quota and not readonly', async t => {
+  await asSelfhosted(async () => {
+    setFloors(t, { seat: INHERIT, storage: 900 * ONE_GB, blob: INHERIT });
+    const { workspace } = await createWorkspace(t);
+    await addBlob(t, workspace.id, 101 * ONE_GB);
+
+    const state = await t.context.state.reconcileWorkspaceQuotaState(
+      workspace.id
+    );
+
+    t.is(state.storageQuota, BigInt(900 * ONE_GB));
+    t.false(state.readonlyReasons.includes('storage_overflow'));
+    t.false(state.readonly);
+  });
+});
+
+test('blob floor 500MB raises the per-file limit in the projection', async t => {
+  await asSelfhosted(async () => {
+    setFloors(t, { seat: INHERIT, storage: INHERIT, blob: 500 * ONE_MB });
+    const { workspace } = await createWorkspace(t);
+
+    const state = await t.context.state.reconcileWorkspaceQuotaState(
+      workspace.id
+    );
+
+    t.is(state.blobLimit, BigInt(500 * ONE_MB));
+  });
+});
+
+test('blob floor also reaches the calculator the upload path uses', async t => {
+  await asSelfhosted(async () => {
+    setFloors(t, { seat: INHERIT, storage: INHERIT, blob: 500 * ONE_MB });
+    const { workspace } = await createWorkspace(t);
+
+    const checkExceeded = await t.context.quota.getWorkspaceQuotaCalculator(
+      workspace.id
+    );
+
+    t.falsy(
+      checkExceeded(400 * ONE_MB)?.blobQuotaExceeded,
+      '400MB is under the raised per-file limit'
+    );
+    t.truthy(
+      checkExceeded(600 * ONE_MB)?.blobQuotaExceeded,
+      '600MB is still over it'
+    );
   });
 });
