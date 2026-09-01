@@ -78,10 +78,10 @@ available to this design.
 
 ## Decision: three layers over one engine
 
-| Layer           | Mechanism                                         | Catches                                                 | Fails when                           |
-| --------------- | ------------------------------------------------- | ------------------------------------------------------- | ------------------------------------ |
-| 1. Prevention   | `scripts/woven-upstream-branch.sh`                | the branch never contains a fork-local patch            | the branch is made by hand instead   |
-| 2. Interception | `.husky/pre-push`                                 | any push to upstream, **or of an `upstream/**` branch anywhere** | `--no-verify`, or hooks not wired up |
+| Layer           | Mechanism                                         | Catches                                                                                      | Fails when                           |
+| --------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------ |
+| 1. Prevention   | `scripts/woven-upstream-branch.sh`                | the branch never contains a fork-local patch                                                 | the branch is made by hand instead   |
+| 2. Interception | `.husky/pre-push`                                 | any push to upstream, **or of an `upstream/**` branch anywhere**                             | `--no-verify`, or hooks not wired up |
 | 3. Backstop     | `woven-manifest-guard.yml`, push to `upstream/**` | a hand-made `upstream/**` branch — **not** a prepared one, which does not carry the workflow | the branch prefix is not used        |
 
 Each layer covers the previous layer's failure mode. All three call the same
@@ -241,7 +241,7 @@ Two decisions:
   that edge case entirely.
 
 **The hook also fires on branch-name intent, not only on destination.** A branch
-named `upstream/**` declares where it is headed, so pushing one *anywhere* runs
+named `upstream/**` declares where it is headed, so pushing one _anywhere_ runs
 the guard. This is not belt-and-braces; it is the only thing covering the most
 likely real flow. Nobody pushes straight to `toeverything/AFFiNE` — they
 `git push origin upstream/foo` and open a cross-fork PR, and on that push the
@@ -275,13 +275,13 @@ prepared branch is observable.
 
 **What each layer actually covers, stated honestly:**
 
-| | prepared branch (`woven-upstream-branch.sh`) | hand-made branch off `woven/main` |
-| --- | --- | --- |
-| 1. preparer | clean at creation; stale after any later commit | not involved |
-| 2. pre-push | **covers it** — via the `upstream/**` name | covers it — via name or destination |
-| 3. CI | **cannot run** — the workflow is not on the branch | covers it |
+|             | prepared branch (`woven-upstream-branch.sh`)       | hand-made branch off `woven/main`   |
+| ----------- | -------------------------------------------------- | ----------------------------------- |
+| 1. preparer | clean at creation; stale after any later commit    | not involved                        |
+| 2. pre-push | **covers it** — via the `upstream/**` name         | covers it — via name or destination |
+| 3. CI       | **cannot run** — the workflow is not on the branch | covers it                           |
 
-Layer 3 is therefore the backstop for the *hand-made* case, not for the prepared
+Layer 3 is therefore the backstop for the _hand-made_ case, not for the prepared
 one. Carrying the guard into the prepared branch would fix that, but the files
 would then appear in the upstream PR — which is precisely what this whole design
 exists to prevent.

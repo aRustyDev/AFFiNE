@@ -1009,37 +1009,37 @@ on:
 
 The four fixture suites are hermetic and fast, and they are what keeps the guard honest. If they only ran on push to `upstream/**` — a rare event — layers 1 and 2 would go untested on ordinary development. Equally, leaving them only on the PR trigger means a push to an `upstream/**` branch never re-checks them.
 
-So: fixtures run always; the two *verdicts* are gated by event.
+So: fixtures run always; the two _verdicts_ are gated by event.
 
 Restructure `jobs:` into three. First, the always-on fixtures:
 
 ```yaml
-  fixtures:
-    name: Guard fixtures
-    runs-on: ubuntu-latest
-    steps:
-      # fetch-depth: 0 is REQUIRED. Several fixtures build throwaway commits
-      # parented on the upstream baseline, which is reachable only as a merge
-      # parent — a shallow checkout cannot resolve it and they fail as exit 2.
-      - name: Checkout (full history — baseline is a merge parent)
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+fixtures:
+  name: Guard fixtures
+  runs-on: ubuntu-latest
+  steps:
+    # fetch-depth: 0 is REQUIRED. Several fixtures build throwaway commits
+    # parented on the upstream baseline, which is reachable only as a merge
+    # parent — a shallow checkout cannot resolve it and they fail as exit 2.
+    - name: Checkout (full history — baseline is a merge parent)
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
 
-      - name: Manifest guard fixtures
-        run: scripts/woven-manifest-guard.test.sh
+    - name: Manifest guard fixtures
+      run: scripts/woven-manifest-guard.test.sh
 
-      - name: Branch-preparer fixtures
-        run: scripts/woven-upstream-branch.test.sh
+    - name: Branch-preparer fixtures
+      run: scripts/woven-upstream-branch.test.sh
 
-      - name: Pre-push hook fixtures
-        run: scripts/woven-pre-push.test.sh
+    - name: Pre-push hook fixtures
+      run: scripts/woven-pre-push.test.sh
 
-      # The sweep itself is NOT run in CI — bd needs a shared Dolt server that
-      # runners cannot reach — but its fixtures use a frozen bead corpus, so the
-      # affine-hn1.3 v0.27.4 dry-run stays permanently verified.
-      - name: Drift-sweep fixtures (frozen v0.27.4 dry-run)
-        run: scripts/woven-drift-sweep.test.sh
+    # The sweep itself is NOT run in CI — bd needs a shared Dolt server that
+    # runners cannot reach — but its fixtures use a frozen bead corpus, so the
+    # affine-hn1.3 v0.27.4 dry-run stays permanently verified.
+    - name: Drift-sweep fixtures (frozen v0.27.4 dry-run)
+      run: scripts/woven-drift-sweep.test.sh
 ```
 
 - [ ] **Step 3: Reduce the existing job to the inbound verdict, gated to PRs**
@@ -1047,10 +1047,10 @@ Restructure `jobs:` into three. First, the always-on fixtures:
 Strip the fixture steps out of `manifest-guard` — they moved to `fixtures` — leaving the checkout and the guard run, and gate it:
 
 ```yaml
-  manifest-guard:
-    name: Upstream divergence is manifested
-    if: github.event_name != 'push'
-    runs-on: ubuntu-latest
+manifest-guard:
+  name: Upstream divergence is manifested
+  if: github.event_name != 'push'
+  runs-on: ubuntu-latest
 ```
 
 A push to `upstream/**` has no unmanifested divergence to find, so the inbound verdict is meaningless there.
@@ -1058,18 +1058,18 @@ A push to `upstream/**` has no unmanifested divergence to find, so the inbound v
 - [ ] **Step 3b: Add the outbound verdict, gated to pushes**
 
 ```yaml
-  upstream-leak-guard:
-    name: No fork-local patch on an upstream branch
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout (full history — baseline is a merge parent)
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+upstream-leak-guard:
+  name: No fork-local patch on an upstream branch
+  if: github.event_name == 'push'
+  runs-on: ubuntu-latest
+  steps:
+    - name: Checkout (full history — baseline is a merge parent)
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
 
-      - name: Outbound leak guard
-        run: scripts/woven-manifest-guard.sh --outbound
+    - name: Outbound leak guard
+      run: scripts/woven-manifest-guard.sh --outbound
 ```
 
 Note what this job does **not** do: it does not run on `workflow_dispatch`. A manual dispatch has no branch guarantee, and `--outbound` on `woven/main` correctly exits 1 — a red run that means nothing would train people to ignore it.
