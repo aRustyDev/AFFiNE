@@ -242,6 +242,25 @@ test('a stamp with no configured id is unchecked, not a mismatch', t => {
   t.is(report.identity.kind, 'unchecked');
 });
 
+// Important fix: previously, a corrupt stamp row read as `stamp: null` from
+// `readStamp`, which collapsed into `identity.kind === 'absent'` — the
+// adoption gate would then run and overwrite the corrupt row. That fails
+// OPEN and destroys evidence of a prior adoption. `compat.ts`'s own
+// philosophy is the opposite: an unreadable migration is coerced to
+// BLOCKING, not treated as safely absent. A corrupt stamp must refuse the
+// same way, and must do so even with no configured deployment id — we
+// cannot confirm whose database this is, so we must not clobber it.
+test('a corrupt stamp is IDENTITY_MISMATCH, even with no configured id', t => {
+  const report = buildReport({
+    ...base,
+    configuredDeploymentId: null,
+    stamp: null,
+    stampCorrupt: true,
+  });
+  t.is(report.verdict, 'IDENTITY_MISMATCH');
+  t.is(report.identity.kind, 'corrupt');
+});
+
 test('identity mismatch outranks DB_AHEAD — the wrong database is the better message', t => {
   const report = buildReport({
     ...base,

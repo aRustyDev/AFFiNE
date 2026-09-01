@@ -47,6 +47,14 @@ export interface CompatInput {
   populated: boolean | null;
   stamp: DeploymentStamp | null;
   configuredDeploymentId: string | null;
+  /**
+   * Whether the `app_configs` row for the stamp existed but could not be
+   * parsed. Optional so existing callers/tests that never set it keep
+   * compiling; `undefined` is treated the same as `false`. See
+   * `IdentityState.corrupt` in `identity.ts` — a corrupt stamp is evidence of
+   * a prior adoption and must refuse rather than read as "no stamp".
+   */
+  stampCorrupt?: boolean;
 }
 
 export interface CompatReport {
@@ -110,7 +118,11 @@ export const REFUSING_VERDICTS: ReadonlySet<Verdict> = new Set<Verdict>([
 export function buildReport(input: CompatInput): CompatReport {
   const { migrations, hasMigrationsTable, appliedRows, populated, stamp } =
     input;
-  const identity = evaluateIdentity(stamp, input.configuredDeploymentId);
+  const identity = evaluateIdentity(
+    stamp,
+    input.configuredDeploymentId,
+    input.stampCorrupt
+  );
 
   const known = migrations ? [...migrations.names] : [];
   const applied = appliedRows
@@ -211,6 +223,18 @@ export function buildReport(input: CompatInput): CompatReport {
     return report(
       'IDENTITY_MISMATCH',
       `this database belongs to deployment "${identity.stamp.deploymentId}" but this server is configured as "${identity.configured}"`,
+      null
+    );
+  }
+
+  // Same precedence slot as the mismatch branch above: a stamp we cannot
+  // read is at least as dangerous as one that names another deployment, and
+  // must refuse rather than let the gate below treat it as "no stamp" and
+  // adopt over it.
+  if (identity.kind === 'corrupt') {
+    return report(
+      'IDENTITY_MISMATCH',
+      'this database carries a deployment stamp that cannot be read, so its identity cannot be confirmed; refusing rather than overwriting it',
       null
     );
   }

@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 
 import type { MigrationRow } from './compat';
+import { isUndefinedTable } from './prisma-errors';
 
 export interface DbState {
   hasMigrationsTable: boolean;
@@ -26,28 +27,6 @@ interface RawMigrationRow {
   migration_name: string;
   finished_at: Date | null;
   rolled_back_at: Date | null;
-}
-
-/** Postgres SQLSTATE for "relation does not exist", as surfaced by a raw
- * `$queryRaw` failure in `error.meta.code`. */
-const UNDEFINED_TABLE = '42P01';
-
-/** Prisma Client's own error code for "the model's table does not exist",
- * thrown by model-based calls like `db.user.count()` at the top-level
- * `error.code` — distinct from the Postgres SQLSTATE above, which a raw
- * query throws instead. Both shapes are real and independently verified;
- * neither is a superset of the other. */
-const PRISMA_TABLE_NOT_FOUND = 'P2021';
-
-function isUndefinedTable(error: unknown): boolean {
-  if (!error || typeof error !== 'object') {
-    return false;
-  }
-  if ((error as { code?: unknown }).code === PRISMA_TABLE_NOT_FOUND) {
-    return true;
-  }
-  const meta = (error as { meta?: { code?: unknown } }).meta;
-  return !!meta && String(meta.code) === UNDEFINED_TABLE;
 }
 
 /**
