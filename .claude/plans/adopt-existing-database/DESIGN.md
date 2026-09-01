@@ -3,7 +3,9 @@
 > **FORK-LOCAL. Additive; the guard core is fork-owned (`src/core/db-compat/`), with three
 > ADDITIVE rows added to `scripts/woven-patch-manifest.md` for the upstream-owned files it
 > wires into. Per `affine-cm9` (fork strategy) and `affine-hn1` (upstream-leak guard).**
-> Status: **DESIGN APPROVED 2026-08-31 — implementation not started.**
+> Status: **DESIGN APPROVED 2026-08-31. Implementation in progress — T1 and T2 landed
+> 2026-09-01; T3–T6 outstanding.** Design changes made during implementation are recorded as
+> D4a/D4b (T1 review) and D15/D16 (T2 review), and the verdict table below reflects them.
 > Bead: `affine-tc6` (P1, open, owner adam). Subtasks `.1`–`.6` = T1–T6 below, to be filed.
 > Cross-refs: infra beads `infra-zptb.6` (restore drill), `infra-zptb.8` (decommission).
 > Decisions: [findings/decision-log.md](findings/decision-log.md) · Grounding:
@@ -28,7 +30,7 @@ server at the _wrong_ populated database is detected instead of half-migrated.
 | Doc                                                      | What                                                                                                                                      |
 | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | [findings/grounding.md](findings/grounding.md)           | Verified facts, all measured on this tree: deployment topology, migration-corpus scan, `app_configs` namespace hazard, Nest boot ordering |
-| [findings/decision-log.md](findings/decision-log.md)     | D1–D14, plus D4a                                                                                                                          |
+| [findings/decision-log.md](findings/decision-log.md)     | D1–D16, plus D4a and D4b                                                                                                                  |
 | [findings/open-questions.md](findings/open-questions.md) | OQ-1, OQ-2 resolved 2026-09-01; OQ-3 (CI gating) and OQ-4 (data migrations) open                                                          |
 | [PLAN.md](PLAN.md)                                       | The task-by-task implementation plan derived from this design                                                                             |
 
@@ -56,19 +58,19 @@ New **fork-owned** directory `packages/backend/server/src/core/db-compat/`. Noth
 upstream-owned lives inside it, so it is rebase-safe by construction and carries no manifest
 row. All judgement sits in the two pure modules.
 
-| File               | Purpose                                                                              | Depends on      |
-| ------------------ | ------------------------------------------------------------------------------------ | --------------- |
-| `classify.ts`      | `classifyDdl(sql) → { tier, hits[] }`. Pattern table only.                           | nothing (pure)  |
-| `migration-set.ts` | Resolve the migrations dir; list names, read `migration.sql`.                        | `node:fs`       |
-| `db-state.ts`      | `_prisma_migrations` via `$queryRaw`: applied / rolled-back / failed / table-absent. | Prisma          |
-| `compat.ts`        | Combine set + state + identity into a `CompatReport` + verdict.                      | pure over above |
-| `identity.ts`      | Read/write the deployment stamp in `app_configs`.                                    | Prisma          |
-| `env.ts`           | The three `process.env` reads, in one place (D13).                                   | nothing         |
-| `service.ts`       | `DbCompatService` plus the pure `decide()` adoption gate.                            | above           |
-| `guard.ts`         | `OnApplicationBootstrap` → refuse to listen; pure `enforce()`.                       | service         |
-| `render.ts`        | Format a `CompatReport` as operator-readable text.                                   | nothing (pure)  |
-| `index.ts`         | `DbCompatModule` + `DbCompatGuardModule` + public types (D14).                       | —               |
-| `cli-module.ts`    | `DbCompatCliModule` — the config+prisma-only CLI context (D7).                       | —               |
+| File               | Purpose                                                                             | Depends on      |
+| ------------------ | ----------------------------------------------------------------------------------- | --------------- |
+| `classify.ts`      | `classifyDdl(sql) → { tier, hits[] }`. Pattern table only.                          | nothing (pure)  |
+| `migration-set.ts` | Resolve the migrations dir; list names, read `migration.sql`.                       | `node:fs`       |
+| `db-state.ts`      | `_prisma_migrations` via `$queryRaw`: raw rows, table-absent, populated-or-unknown. | Prisma          |
+| `compat.ts`        | Combine set + state + identity into a `CompatReport` + verdict.                     | pure over above |
+| `identity.ts`      | Read/write the deployment stamp in `app_configs`.                                   | Prisma          |
+| `env.ts`           | The three `process.env` reads, in one place (D13).                                  | nothing         |
+| `service.ts`       | `DbCompatService` plus the pure `decide()` adoption gate.                           | above           |
+| `guard.ts`         | `OnApplicationBootstrap` → refuse to listen; pure `enforce()`.                      | service         |
+| `render.ts`        | Format a `CompatReport` as operator-readable text.                                  | nothing (pure)  |
+| `index.ts`         | `DbCompatModule` + `DbCompatGuardModule` + public types (D14).                      | —               |
+| `cli-module.ts`    | `DbCompatCliModule` — the config+prisma-only CLI context (D7).                      | —               |
 
 ## Verdicts
 
@@ -80,16 +82,44 @@ the first deploy that contains it.
 `finished_at IS NULL AND rolled_back_at IS NULL` is a failed or interrupted migration and gets
 its own verdict rather than being counted either way.
 
-| Verdict             | Meaning                                   | Predeploy                              | Boot                    |
-| ------------------- | ----------------------------------------- | -------------------------------------- | ----------------------- |
-| `VIRGIN`            | no `_prisma_migrations`, no users         | proceed                                | proceed                 |
-| `EQUAL`             | applied == known                          | proceed                                | proceed                 |
-| `DB_BEHIND`         | known ⊃ applied                           | migrate (subject to the adoption gate) | proceed                 |
-| `DB_AHEAD`          | applied ⊃ known                           | **refuse**                             | **refuse**              |
-| `DIVERGED`          | both ahead and behind                     | **refuse**                             | **refuse**              |
-| `IDENTITY_MISMATCH` | stamp ≠ configured `AFFINE_DEPLOYMENT_ID` | **refuse**                             | **refuse**              |
-| `MIGRATION_FAILED`  | a row unfinished and not rolled back      | **refuse**                             | **refuse**              |
-| `UNREADABLE`        | migrations dir not found                  | **refuse**                             | log ERROR, **continue** |
+| Verdict             | Meaning                                         | Predeploy                              | Boot                    |
+| ------------------- | ----------------------------------------------- | -------------------------------------- | ----------------------- |
+| `VIRGIN`            | no `_prisma_migrations`, no users               | proceed                                | proceed                 |
+| `EQUAL`             | applied == known                                | proceed                                | proceed                 |
+| `DB_BEHIND`         | known ⊃ applied                                 | migrate (subject to the adoption gate) | proceed                 |
+| `DB_AHEAD`          | applied ⊃ known                                 | **refuse**                             | **refuse**              |
+| `DIVERGED`          | both ahead and behind                           | **refuse**                             | **refuse**              |
+| `IDENTITY_MISMATCH` | stamp ≠ configured `AFFINE_DEPLOYMENT_ID`       | **refuse**                             | **refuse**              |
+| `MIGRATION_FAILED`  | a row unfinished and not rolled back            | **refuse**                             | **refuse**              |
+| `SCHEMA_INCOMPLETE` | migrations recorded, but a core table is absent | **refuse**                             | **refuse**              |
+| `UNREADABLE`        | migrations dir not found                        | **refuse**                             | log ERROR, **continue** |
+
+Precedence, and it is load-bearing — an earlier branch wins:
+
+```
+UNREADABLE → MIGRATION_FAILED → IDENTITY_MISMATCH → DIVERGED → DB_AHEAD → SCHEMA_INCOMPLETE → VIRGIN → DB_BEHIND → EQUAL
+```
+
+**`SCHEMA_INCOMPLETE` was added during T2**, after code review found a verified fail-open: a
+database whose `_prisma_migrations` records applied migrations but whose `users` table is absent
+reported `EQUAL` with `rollbackPossible: true` — a clean bill of health for a broken schema. With
+both tables absent it reported `VIRGIN`, i.e. "fresh install, proceed", and `migrate deploy` then
+collides on `CREATE TABLE`. The root cause was that `populated` was a plain boolean, so "I could
+not determine this" was indistinguishable from "empty". `populated` is now `boolean | null`, and:
+
+- `SCHEMA_INCOMPLETE` = `populated === null && hasMigrationsTable` — the schema contradicts itself.
+- `VIRGIN` = `!hasMigrationsTable && (populated === false || populated === null)` — null is fine
+  here, because a schema with _neither_ table is genuinely empty rather than contradictory.
+
+A partially-restored database is item 3 of the bead, so this is the scenario the work exists for
+rather than a hypothetical.
+
+**`rollbackPossible` semantics, also corrected in T2.** The engine classifies only _pending_
+migrations; it never classifies what is already applied. So `EQUAL` reports `null` ("the question
+does not apply" — nothing is pending) rather than `true`, which would assert rollback safety on
+evidence never gathered, in the state the live cluster is normally in. Conversely `VIRGIN` reports
+the computed value rather than `null`, because on a fresh install everything _will_ be applied and
+"IMPOSSIBLE" is both factual and useful.
 
 `UNREADABLE` is asymmetric on purpose. A predeploy wedge is safe; refusing to _boot_ over a
 packaging fault could wedge the fleet for a non-safety reason. Since the initContainer shares
@@ -101,9 +131,9 @@ DB_AHEAD / UNRELATED. The first three keep their names. **`UNRELATED` splits int
 because it has two distinguishable causes and they deserve different messages: a _branched
 migration history_ (`DIVERGED` — applied and known each contain names the other lacks) and a
 _different deployment's database_ (`IDENTITY_MISMATCH` — the stamp names another deployment).
-Both refuse. `VIRGIN`, `MIGRATION_FAILED`, and `UNREADABLE` are additions: the bead's four
-classes tacitly assume a readable, non-empty, non-broken migration history, and each of those
-three needs an answer that is neither "adopt" nor a crash.
+Both refuse. `VIRGIN`, `MIGRATION_FAILED`, `SCHEMA_INCOMPLETE` and `UNREADABLE` are additions: the
+bead's four classes tacitly assume a readable, non-empty, self-consistent migration history, and
+each of those four needs an answer that is neither "adopt" nor a crash. Nine verdicts total.
 
 ## DDL classification (tiers)
 

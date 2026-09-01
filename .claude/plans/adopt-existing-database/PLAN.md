@@ -2770,7 +2770,7 @@ Do **not** run `bd dolt push` — the shared Dolt server has no configured remot
 | `classify.ts`, tiers, `$$` scrubbing, corpus       | T1          |
 | `migration-set.ts`, dir resolution                 | T1          |
 | `db-state.ts`, `_prisma_migrations`, missing table | T2          |
-| `compat.ts`, all 8 verdicts, precedence            | T2          |
+| `compat.ts`, all 9 verdicts, precedence            | T2          |
 | `identity.ts`, `$deployment` inertness             | T3          |
 | Env knobs read from `process.env` (D13)            | T3          |
 | Adoption gate, minted-UUID ratchet (D3, D5)        | T3          |

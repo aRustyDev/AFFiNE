@@ -146,6 +146,31 @@ calls; D5–D10 follow from them plus the grounding measurements.
   restored database" step?) cannot be answered well until the command exists and its exact
   invocation and output are known. _Status: accepted 2026-09-01 (operator)._
 
+- **D15 — A ninth verdict, `SCHEMA_INCOMPLETE`, and `populated: boolean | null`.** Added during T2
+  code review, which verified a fail-open: a database whose `_prisma_migrations` records applied
+  migrations but whose `users` table is absent reported `EQUAL` with `rollbackPossible: true` — a
+  clean bill of health for a broken schema — and with both tables absent reported `VIRGIN`, i.e.
+  "fresh install, proceed", after which `migrate deploy` collides on `CREATE TABLE`.
+
+  Root cause: `populated` was a plain boolean, so a _failed_ user count (undefined table, swallowed)
+  was indistinguishable from a genuine zero. Under a fail-closed principle an unknown must never
+  render as `false`. `populated` is now `boolean | null`; `SCHEMA_INCOMPLETE` fires on
+  `populated === null && hasMigrationsTable` and refuses at both enforcement points, while `VIRGIN`
+  accepts a null only when `hasMigrationsTable` is also false — a schema with neither table is
+  genuinely empty, not contradictory.
+
+  Worth stating why this is in scope rather than gold-plating: a partially-restored database is
+  **item 3 of the bead**, so it is the scenario the work exists for. _Status: accepted (T2 review)._
+
+- **D16 — `rollbackPossible` is `null` for `EQUAL` and computed for `VIRGIN`.** The engine
+  classifies only _pending_ migrations and never what is already applied. `EQUAL` therefore used to
+  hard-code `true`, asserting rollback safety on evidence it had not gathered — in the state the
+  live cluster is normally in, and rendered to operators as `POSSIBLE`. Meanwhile `VIRGIN` computed
+  the real answer (everything pending, some `BLOCKING`) and discarded it as `null` → `UNKNOWN`.
+  Exactly backwards. Now `EQUAL` reports `null` (the question genuinely does not apply when nothing
+  is pending) and `VIRGIN` reports the computed value, because on a fresh install everything will be
+  applied and "IMPOSSIBLE" is both factual and actionable. _Status: accepted (T2 review)._
+
 ## Rejected approaches
 
 - **All logic in `self-host-predeploy.js` as plain JS.** No app-graph coupling and it would run
