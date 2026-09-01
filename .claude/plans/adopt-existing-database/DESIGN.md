@@ -4,8 +4,10 @@
 > ADDITIVE rows added to `scripts/woven-patch-manifest.md` for the upstream-owned files it
 > wires into. Per `affine-cm9` (fork strategy) and `affine-hn1` (upstream-leak guard).**
 > Status: **DESIGN APPROVED 2026-08-31. Implementation in progress — T1 and T2 landed
-> 2026-09-01; T3–T6 outstanding.** Design changes made during implementation are recorded as
-> D4a/D4b (T1 review) and D15/D16 (T2 review), and the verdict table below reflects them.
+> 2026-09-01; T3 in review, T4–T6 outstanding.** Design changes made during implementation are
+> recorded as D4a/D4b (T1 review), D15/D16 (T2 review) and **D17–D20 (T3 review, including a
+> showstopper: the gate crashed on every fresh install)**. The verdict table and wiring below
+> reflect them.
 > Bead: `affine-tc6` (P1, open, owner adam). Subtasks `.1`–`.6` = T1–T6 below, to be filed.
 > Cross-refs: infra beads `infra-zptb.6` (restore drill), `infra-zptb.8` (decommission).
 > Decisions: [findings/decision-log.md](findings/decision-log.md) · Grounding:
@@ -30,7 +32,7 @@ server at the _wrong_ populated database is detected instead of half-migrated.
 | Doc                                                      | What                                                                                                                                      |
 | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | [findings/grounding.md](findings/grounding.md)           | Verified facts, all measured on this tree: deployment topology, migration-corpus scan, `app_configs` namespace hazard, Nest boot ordering |
-| [findings/decision-log.md](findings/decision-log.md)     | D1–D16, plus D4a and D4b                                                                                                                  |
+| [findings/decision-log.md](findings/decision-log.md)     | D1–D20, plus D4a and D4b                                                                                                                  |
 | [findings/open-questions.md](findings/open-questions.md) | OQ-1, OQ-2 resolved 2026-09-01; OQ-3 (CI gating) and OQ-4 (data migrations) open                                                          |
 | [PLAN.md](PLAN.md)                                       | The task-by-task implementation plan derived from this design                                                                             |
 
@@ -89,7 +91,7 @@ its own verdict rather than being counted either way.
 | `DB_BEHIND`         | known ⊃ applied                                 | migrate (subject to the adoption gate) | proceed                 |
 | `DB_AHEAD`          | applied ⊃ known                                 | **refuse**                             | **refuse**              |
 | `DIVERGED`          | both ahead and behind                           | **refuse**                             | **refuse**              |
-| `IDENTITY_MISMATCH` | stamp ≠ configured `AFFINE_DEPLOYMENT_ID`       | **refuse**                             | **refuse**              |
+| `IDENTITY_MISMATCH` | stamp ≠ configured id, **or stamp unreadable**  | **refuse**                             | **refuse**              |
 | `MIGRATION_FAILED`  | a row unfinished and not rolled back            | **refuse**                             | **refuse**              |
 | `SCHEMA_INCOMPLETE` | migrations recorded, but a core table is absent | **refuse**                             | **refuse**              |
 | `UNREADABLE`        | migrations dir not found                        | **refuse**                             | log ERROR, **continue** |
@@ -229,20 +231,34 @@ Payload:
 
 ## Wiring
 
-- **`cli.ts`** gains a `db` command group:
+- **`cli.ts`** gains a `db` command group — three commands, and the split between them is
+  load-bearing (D17):
 
   - `db status` — the dry-run report: verdict, applied/known counts, pending list with tier and
     the matched DDL lines, identity state, and an explicit rollback-possible verdict. `--json`
     for CI. Always exits 0; it is informational.
-  - `db check` — the gate. Exits non-zero with a precise reason. Honors `--adopt`.
+  - `db check` — the gate. **Writes nothing.** Exits non-zero with a precise reason. Honors
+    `--adopt`.
+  - `db stamp` — records the adoption decision. Idempotent. Run **after** migrations. On an
+    already-stamped database it updates only `lastMigratedBy`; if the verdict refuses, it declines
+    to stamp.
 
-  Both run on a **minimal Nest context — `ConfigModule` + `PrismaModule` only** — via a new
+  All three run on a **minimal Nest context — `ConfigModule` + `PrismaModule` only** — via a new
   `withMinimalApp` helper beside the existing `withCliApp`, so the gate cannot fail for Redis
   or Manticore reasons (D7). Verified viable: `PrismaFactory` depends only on `Config`.
 
-- **`scripts/self-host-predeploy.js`**: `runCompatGate()` between `fixFailedMigrations()` and
-  `runPrismaMigrations()`, shelling out to `yarn cli db check` in the same `execSync` idiom the
-  script already uses. Non-zero exit wedges the initContainer.
+- **`scripts/self-host-predeploy.js`**: the gate goes **before** any migration and the record goes
+  **after**, both via the `execSync` idiom the script already uses:
+
+  ```
+  prepare → fixFailedMigrations → db check → prisma migrate deploy → data migrations → db stamp
+  ```
+
+  A non-zero exit from `db check` wedges the initContainer with nothing yet mutated, which is the
+  safe failure. **Why the record cannot share the gate's position:** on a fresh install `app_configs`
+  does not exist until `prisma migrate deploy` has run, and `writeStamp` throws Prisma `P2021`
+  against it — measured, see D17. The gate must run before migrations to be worth anything (refusing
+  _after_ applying a contracting migration is useless), so the two cannot occupy the same slot.
 
 - **`app.module.ts`**: **two modules** (D14). `DbCompatModule` provides and exports
   `DbCompatService` only and is safe anywhere, including the minimal CLI context.

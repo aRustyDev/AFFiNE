@@ -171,6 +171,70 @@ calls; D5–D10 follow from them plus the grounding measurements.
   is pending) and `VIRGIN` reports the computed value, because on a fresh install everything will be
   applied and "IMPOSSIBLE" is both factual and actionable. _Status: accepted (T2 review)._
 
+- **D17 — `db check` is pure; a separate `db stamp` records, AFTER migrations.** Forced by a
+  showstopper found in T3 review and verified directly: the predeploy gate runs **before**
+  `prisma migrate deploy`, so on any fresh install `app_configs` does not exist yet, and both
+  `readStamp` and `writeStamp` throw Prisma `P2021`:
+
+  ```
+  readDbState degraded OK: {"hasMigrationsTable":false,"rows":[],"populated":null}
+  readStamp  THREW → code: P2021
+  writeStamp THREW → code: P2021
+  ```
+
+  `report()` therefore threw before `decide()` was reached — **fresh installs could not deploy at
+  all**, and `db status` (specified to always exit 0) crashed on a virgin database. `db-state.ts`
+  guarded both its reads with `isUndefinedTable`; `identity.ts` guarded neither.
+
+  Error handling alone cannot fix it: `writeStamp` needs `app_configs` too, so a fresh install's
+  stamp **cannot be written at the pre-migration gate** at any level of defensiveness. Hence the
+  split. New predeploy order:
+
+  ```
+  fixFailedMigrations → db check (gate; writes nothing) → prisma migrate deploy
+                      → data migrations → db stamp (records; app_configs now exists)
+  ```
+
+  Two things fall out of the split beyond fixing the crash, and both are improvements on their own
+  merits: a command called `check` no longer mutates the database, and `db stamp` gives
+  `lastMigratedBy` a natural update point (it previously named the _adopting_ binary forever,
+  because `recordAdoption` was its only writer and only ran on first adoption).
+
+  This does not reverse D8. D8 rejected a `db adopt` subcommand duplicating the operator's adopt
+  _decision_; `db stamp` is a deploy-pipeline step, and `--adopt` / `AFFINE_DB_ADOPT` remain the
+  only way to express that decision. _Status: accepted (T3 review)._
+
+- **D18 — an unreadable deployment stamp REFUSES rather than reading as absent.** T3 review found a
+  fail-open: `readStamp` collapsed "no row" and "row present but unparseable" into `null`, so
+  `identity.kind` became `absent`, the adoption gate ran, and `recordAdoption` **upserted over the
+  corrupt row**. Concretely: a database belonging to `prod-a` with a corrupt stamp, and a `prod-b`
+  server pointed at it, should be `IDENTITY_MISMATCH`; instead it adopted and destroyed the
+  evidence. That contradicts the module's own philosophy, where an unreadable _migration_ is
+  explicitly coerced to `BLOCKING` to fail closed.
+
+  `IdentityState` gains a `corrupt` arm and `buildReport` maps it to `IDENTITY_MISMATCH` with a
+  distinct reason. It refuses **even when `AFFINE_DEPLOYMENT_ID` is unset**: we cannot confirm whose
+  database this is, and the row is evidence of a prior adoption we must not clobber.
+
+  Also in the same area: `parseStamp` validated only `deploymentId` and `adoptedAt` (and the latter
+  only for `typeof === 'string'`, so `''` passed) before asserting the full type. A row missing
+  `adoptionMode`/`adoptedBy` crashed a renderer reading `adoptedBy.version` — again in the command
+  specified to always exit 0. All fields are now validated. _Status: accepted (T3 review)._
+
+- **D19 — `populated === false` selects `fresh-install`, not adoption.** `decide()` never read
+  `populated`, so `hasMigrationsTable: true` with zero users — precisely the state a fresh install
+  is in after D17's `db check → migrate → db stamp` sequence — logged "ADOPTING pre-existing
+  database" about a database with no data, and with a `BLOCKING` pending migration would refuse
+  "adoption of a pre-existing database" holding zero rows. Adoption is about taking ownership of
+  pre-existing **data**, and `populated` is exactly that signal. _Status: accepted (T3 review)._
+
+- **D20 — `CompatDecision` carries `bootMayContinue`.** The `REFUSING_VERDICTS` branch and the
+  `UNREADABLE` branch returned byte-identical decisions, so the boot guard had to reach into
+  `decision.report.verdict` to recover D9's asymmetry — and the obvious `if (!decision.ok) throw`
+  would cause fleet-wide boot failure on a packaging fault, which is the exact outcome D9 exists to
+  prevent. The asymmetry is now a named field, set where it is understood and testable there.
+  _Status: accepted (T3 review)._
+
 ## Rejected approaches
 
 - **All logic in `self-host-predeploy.js` as plain JS.** No app-graph coupling and it would run

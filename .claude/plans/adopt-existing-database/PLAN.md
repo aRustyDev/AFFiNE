@@ -126,11 +126,11 @@ the parser saw for each row.
 
 **Modify — upstream-owned, each needs a `scripts/woven-patch-manifest.md` row:**
 
-| Path                             | Change                                           | Task |
-| -------------------------------- | ------------------------------------------------ | ---- |
-| `src/cli.ts`                     | `withMinimalApp` + the `db` command group        | T4   |
-| `src/app.module.ts`              | import `DbCompatGuardModule` into `AppModule`    | T5   |
-| `scripts/self-host-predeploy.js` | `runCompatGate()` before `runPrismaMigrations()` | T5   |
+| Path                             | Change                                               | Task |
+| -------------------------------- | ---------------------------------------------------- | ---- |
+| `src/cli.ts`                     | `withMinimalApp` + the `db` command group            | T4   |
+| `src/app.module.ts`              | import `DbCompatGuardModule` into `AppModule`        | T5   |
+| `scripts/self-host-predeploy.js` | `db check` before migrations, `db stamp` after (D17) | T5   |
 
 **Modify — fork-owned, no row needed:** `scripts/woven-patch-manifest.md` (T6).
 
@@ -2615,6 +2615,15 @@ function runCompatGate() {
     stdio: 'inherit',
   });
 }
+
+function recordAdoption() {
+  console.log('recording the deployment stamp.');
+  execSync('yarn cli db stamp', {
+    encoding: 'utf-8',
+    env: process.env,
+    stdio: 'inherit',
+  });
+}
 ```
 
 Then change the call sequence at the bottom of the file from:
@@ -2637,6 +2646,13 @@ fixFailedMigrations();
 runCompatGate();
 runPrismaMigrations();
 runDataMigrations();
+// Record AFTER, because the stamp lives in `app_configs`, which does not exist
+// on a fresh install until `prisma migrate deploy` has run — `writeStamp` throws
+// Prisma P2021 against it (measured; design D17). The gate cannot move later:
+// refusing after a contracting migration has already been applied is useless.
+// So the two steps have to sit on opposite sides of the migration. `db stamp`
+// is idempotent, and declines to stamp if the verdict refuses.
+recordAdoption();
 ```
 
 - [ ] **Step 9: Verify the gate actually refuses a DB_AHEAD database**
@@ -2665,10 +2681,10 @@ Expected after cleanup: `yarn workspace @affine/server data-migration db check` 
 
 Append to the "Diverged upstream-owned files" table in `scripts/woven-patch-manifest.md`:
 
-| File                                                     | Category     | Why                                                                                                                                                                                                                                                                                                                                                       | Delete when                                                 |
-| -------------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `packages/backend/server/src/app.module.ts`              | **ADDITIVE** | One added import: `DbCompatGuardModule` in `AppModule`'s `imports`, for the `affine-tc6` boot-time compatibility guard. Deliberately NOT added to `FunctionalityModules`, which `CliAppModule` shares — a guard reachable from the CLI would stop `db check` from running when it is most needed. One line, low-conflict.                                 | upstream grows its own boot-time schema-compatibility check |
-| `packages/backend/server/scripts/self-host-predeploy.js` | **ADDITIVE** | Adds `runCompatGate()` (`yarn cli db check`) before `runPrismaMigrations()`, so a DB_AHEAD or wrong-deployment database is refused before any migration is applied. Both real deployment paths already invoke this script — the k8s initContainer and the self-host compose one-shot — which is why the `affine-tc6` gate needs no infrastructure change. | upstream's predeploy grows an equivalent guard              |
+| File                                                     | Category     | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Delete when                                                 |
+| -------------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `packages/backend/server/src/app.module.ts`              | **ADDITIVE** | One added import: `DbCompatGuardModule` in `AppModule`'s `imports`, for the `affine-tc6` boot-time compatibility guard. Deliberately NOT added to `FunctionalityModules`, which `CliAppModule` shares — a guard reachable from the CLI would stop `db check` from running when it is most needed. One line, low-conflict.                                                                                                                                                                                                   | upstream grows its own boot-time schema-compatibility check |
+| `packages/backend/server/scripts/self-host-predeploy.js` | **ADDITIVE** | Adds `runCompatGate()` (`yarn cli db check`) before `runPrismaMigrations()`, so a DB_AHEAD or wrong-deployment database is refused before anything mutates, plus `recordAdoption()` (`yarn cli db stamp`) after the migrations — the stamp lives in `app_configs`, which does not exist on a fresh install until they have run (D17). Both real deployment paths already invoke this script — the k8s initContainer and the self-host compose one-shot — which is why the `affine-tc6` gate needs no infrastructure change. | upstream's predeploy grows an equivalent guard              |
 
 - [ ] **Step 11: Verify the manifest guard and the full db-compat suite**
 
