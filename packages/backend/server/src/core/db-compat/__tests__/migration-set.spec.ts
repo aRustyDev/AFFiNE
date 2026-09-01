@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -6,8 +6,22 @@ import test from 'ava';
 
 import { loadMigrationSet, resolveMigrationsDir } from '../migration-set';
 
+const tempDirs: string[] = [];
+
+const tempDir = (prefix: string) => {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+};
+
+test.after.always('remove temp directories', () => {
+  for (const dir of tempDirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 const fixture = () => {
-  const root = mkdtempSync(join(tmpdir(), 'db-compat-'));
+  const root = tempDir('db-compat-');
   const dir = join(root, 'migrations');
   mkdirSync(join(dir, '20240101000000_a'), { recursive: true });
   mkdirSync(join(dir, '20240102000000_b'), { recursive: true });
@@ -29,7 +43,19 @@ test('resolveMigrationsDir finds migrations/ under the given root', t => {
 });
 
 test('resolveMigrationsDir returns null when no candidate has one', t => {
-  t.is(resolveMigrationsDir([mkdtempSync(join(tmpdir(), 'empty-'))]), null);
+  t.is(resolveMigrationsDir([tempDir('empty-')]), null);
+});
+
+test('resolveMigrationsDir rejects a migrations/ directory without migration_lock.toml (issue 5)', t => {
+  const root = tempDir('db-compat-nolock-');
+  mkdirSync(join(root, 'migrations', '20240101000000_a'), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(root, 'migrations', '20240101000000_a', 'migration.sql'),
+    'CREATE TABLE "a" ();'
+  );
+  t.is(resolveMigrationsDir([root]), null);
 });
 
 test('loadMigrationSet lists directories only, sorted, skipping the lock file', t => {
@@ -44,9 +70,9 @@ test('loadMigrationSet reads migration.sql by name', t => {
   t.is(loadMigrationSet(dir)!.sql('20240102000000_b'), 'DROP TABLE "a";');
 });
 
-test('loadMigrationSet returns empty sql for an unknown name rather than throwing', t => {
+test('loadMigrationSet returns null for an unknown name rather than throwing', t => {
   const { dir } = fixture();
-  t.is(loadMigrationSet(dir)!.sql('nope'), '');
+  t.is(loadMigrationSet(dir)!.sql('nope'), null);
 });
 
 test('the real repository migrations directory resolves and has 117 entries', t => {
