@@ -36,9 +36,13 @@ export interface CompatInput {
   /**
    * Whether the database has user data. `null` means this could not be
    * determined (the `users` table itself is missing) — see `DbState.populated`
-   * in `db-state.ts`. `null` must never be treated as `false`: on a database
-   * that otherwise has migration history, an undetermined population is a
-   * schema inconsistency (`SCHEMA_INCOMPLETE`), not evidence of "empty".
+   * in `db-state.ts`. Where migration history exists (`hasMigrationsTable:
+   * true`), `null` must never be collapsed into `false`: an undetermined
+   * population on a database that otherwise has recorded history is a schema
+   * inconsistency (`SCHEMA_INCOMPLETE`), not evidence of "empty". When there
+   * is no migration history either, `null` and `false` are treated alike
+   * (see `VIRGIN` below) — a schema with neither table is genuinely empty
+   * rather than contradictory.
    */
   populated: boolean | null;
   stamp: DeploymentStamp | null;
@@ -72,8 +76,8 @@ export interface CompatReport {
   ahead: string[];
   failed: string[];
   /**
-   * Whether image rollback across the newest already-applied migration is
-   * possible. Computed from PENDING migrations only — this engine never
+   * Whether rollback would still be possible after the pending migrations
+   * are applied. Computed from PENDING migrations only — this engine never
    * classifies migrations that are already applied, so it never asserts
    * anything about their reversibility.
    *
@@ -81,9 +85,13 @@ export interface CompatReport {
    *   tiers of `pending`.
    * - `EQUAL`: `null`. Nothing is pending, so there is nothing to classify —
    *   not "yes": applied migrations were never examined.
-   * - `UNREADABLE`, `MIGRATION_FAILED`, `IDENTITY_MISMATCH`, `DIVERGED`,
-   *   `DB_AHEAD`, `SCHEMA_INCOMPLETE`: `null`. These verdicts refuse
-   *   outright, so the question is moot.
+   * - `MIGRATION_FAILED`, `IDENTITY_MISMATCH`, `DIVERGED`, `DB_AHEAD`,
+   *   `SCHEMA_INCOMPLETE`: `null`. These verdicts refuse outright (see
+   *   `REFUSING_VERDICTS`), so the question is moot.
+   * - `UNREADABLE`: also `null`, but for a different reason — it is NOT a
+   *   refusal (deliberately excluded from `REFUSING_VERDICTS`; boot logs and
+   *   continues, per design D9). `null` here means nothing could be
+   *   classified at all, since there is no migration set to compare against.
    */
   rollbackPossible: boolean | null;
   populated: boolean | null;
@@ -223,26 +231,34 @@ export function buildReport(input: CompatInput): CompatReport {
     );
   }
 
-  // Migration history is recorded (rows exist / the table exists) but a core
-  // table is missing, so the schema contradicts itself: this is neither a
-  // clean install nor a consistent existing one. `populated === null` and no
-  // migrations table together mean "no history and no data", handled by
-  // VIRGIN below — it's specifically the combination of *having* history
-  // while population is undetermined that is contradictory.
+  // The migrations table itself is present but a core table is missing, so
+  // the schema contradicts itself: this is neither a clean install nor a
+  // consistent existing one. This does NOT require any applied rows — a
+  // table left by an aborted setup, or one whose rows were all deliberately
+  // rolled back, hits this branch just as much as a database with rows
+  // genuinely applied, and the reason must not claim otherwise.
+  // `populated === null` with no migrations table means "no history and no
+  // data", handled by VIRGIN below — it's specifically the combination of
+  // *having* the migrations table while population is undetermined that is
+  // contradictory.
   if (populated === null && hasMigrationsTable) {
     return report(
       'SCHEMA_INCOMPLETE',
-      'the migration history records applied migrations but the users table is absent, so this database is inconsistent',
+      'the migrations table is present but the users table is absent, so this database is inconsistent',
       null
     );
   }
 
   if (!hasMigrationsTable && (populated === false || populated === null)) {
-    return report(
-      'VIRGIN',
-      'no migration history and no data — a fresh install',
-      rollbackPossible
-    );
+    // `populated === null` here means no determination could be made about
+    // data (the users table itself is missing), not that data was found and
+    // counted as zero — the reason must say so rather than claiming "no
+    // data" for a state that was never actually checked.
+    const reason =
+      populated === null
+        ? 'no migration history and no users table — a fresh install'
+        : 'no migration history and no data — a fresh install';
+    return report('VIRGIN', reason, rollbackPossible);
   }
 
   if (pending.length > 0) {

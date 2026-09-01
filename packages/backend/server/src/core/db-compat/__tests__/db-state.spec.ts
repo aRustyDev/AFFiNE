@@ -46,6 +46,11 @@ test('readDbState surfaces a missing table as hasMigrationsTable false, not a th
   // different session than the query that follows it — a flaky test. `?schema=`
   // is applied per connection, so it holds for every query this client makes.
   const SCRATCH = 'db_compat_scratch';
+  // Drop before create so a leftover schema from an abnormally-terminated
+  // previous run (killed process, machine restart) doesn't turn into a
+  // duplicate-table error on this run instead of the test just working —
+  // this database may be shared with other active work.
+  await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
   await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${SCRATCH}"`);
   const scratch = scratchClient(SCRATCH);
 
@@ -66,6 +71,9 @@ test('readDbState surfaces a missing table as hasMigrationsTable false, not a th
 
 test('readDbState reports populated true when the users table has rows', async t => {
   const SCRATCH = 'db_compat_scratch_populated';
+  // See the note in the missing-table test above: drop before create keeps
+  // this idempotent across an abnormally-terminated previous run.
+  await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
   await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${SCRATCH}"`);
   // Only `users` (the `@@map`-ed table for the User model) needs to exist for
   // `db.user.count()` to succeed — a plain count with no filter never
@@ -91,6 +99,9 @@ test('readDbState reports populated null when migration history exists but the u
   // The restore/DR scenario affine-tc6 exists for: a partially-restored
   // database that recorded migration history but is missing a core table.
   const SCRATCH = 'db_compat_scratch_partial';
+  // See the note in the missing-table test above: drop before create keeps
+  // this idempotent across an abnormally-terminated previous run.
+  await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
   await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${SCRATCH}"`);
   await db.$executeRawUnsafe(`
     CREATE TABLE "${SCRATCH}"."_prisma_migrations" (

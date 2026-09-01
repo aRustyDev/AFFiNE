@@ -10,11 +10,14 @@ export interface DbState {
    *
    * `null` means this could not be determined — the `users` table itself is
    * missing — and is distinct from `false`, which means the table exists and
-   * was counted as empty. Callers must not collapse `null` into `false`: a
-   * database that has migration history (`hasMigrationsTable: true`) but an
-   * undetermined population is a schema inconsistency, not a fresh install.
-   * See the `SCHEMA_INCOMPLETE` verdict in `compat.ts`, which exists
-   * specifically for this combination.
+   * was counted as empty. Where migration history exists
+   * (`hasMigrationsTable: true`), callers must not collapse `null` into
+   * `false`: an undetermined population on a database that otherwise has
+   * recorded history is a schema inconsistency, not a fresh install. See the
+   * `SCHEMA_INCOMPLETE` verdict in `compat.ts`, which exists specifically
+   * for this combination. When there is no migration history either, `null`
+   * and `false` are treated alike (see `VIRGIN` in `compat.ts`) — a schema
+   * with neither table is genuinely empty, not contradictory.
    */
   populated: boolean | null;
 }

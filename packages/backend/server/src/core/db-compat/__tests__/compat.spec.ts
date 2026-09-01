@@ -56,6 +56,7 @@ test('VIRGIN when there is no migrations table and no data', t => {
   // BLOCKING migration on its way up — VIRGIN must report the computed
   // answer from `pending`, not throw it away as null.
   t.false(report.rollbackPossible);
+  t.is(report.reason, 'no migration history and no data — a fresh install');
 });
 
 test('VIRGIN still holds when population could not be determined', t => {
@@ -66,15 +67,29 @@ test('VIRGIN still holds when population could not be determined', t => {
     populated: null,
   });
   t.is(report.verdict, 'VIRGIN');
+  // populated: null means "never checked", not "checked and found empty" —
+  // the reason must not claim "no data" for a state that was never examined.
+  t.is(
+    report.reason,
+    'no migration history and no users table — a fresh install'
+  );
 });
 
 test('SCHEMA_INCOMPLETE when migration history exists but population could not be determined', t => {
   const report = buildReport({
     ...base,
+    // Zero applied rows on purpose: this branch must not claim migrations
+    // were recorded as applied — it is reachable with none, e.g. a table
+    // left by an aborted setup, or a history that was entirely rolled back.
+    appliedRows: [],
     populated: null,
   });
   t.is(report.verdict, 'SCHEMA_INCOMPLETE');
   t.is(report.rollbackPossible, null);
+  t.is(
+    report.reason,
+    'the migrations table is present but the users table is absent, so this database is inconsistent'
+  );
 });
 
 test('DB_BEHIND lists pending migrations with tiers', t => {
