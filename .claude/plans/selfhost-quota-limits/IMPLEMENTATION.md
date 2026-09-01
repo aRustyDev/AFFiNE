@@ -48,21 +48,56 @@ eval "$(micromamba shell hook -s bash)" && micromamba activate affine && node --
 
 Expected: `v22.22.3` (any `v22.x` satisfies the repo's `>=22.12 <23`).
 
-- [ ] **Step 2: Bring up the disposable stack**
+- [ ] **Step 2: Create the compose files (they do not exist by default)**
 
-🚨 Server tests `TRUNCATE` the database. Only ever point `DATABASE_URL` at `localhost:5432`.
+`.docker/dev/` ships only `*.example` files; `compose.yml` and `.env` are listed in
+`.docker/dev/.gitignore`, so **every fresh clone and every new worktree needs its own copy**.
+The examples work unedited — `.env` sets Postgres to `affine`/`affine`/`affine`, which is what
+the `DATABASE_URL` below expects.
+
+```bash
+cp -n .docker/dev/.env.example .docker/dev/.env && cp -n .docker/dev/compose.yml.example .docker/dev/compose.yml
+```
+
+`-n` so this is safe to re-run. Ignore `.docker/dev/README.md`'s cert/nginx section — it is
+macOS + OrbStack only.
+
+- [ ] **Step 3: Check the ports are free before starting anything**
+
+```bash
+for p in 5432 6379 1025 8025; do netstat -ano | grep -qE "LISTENING.*:$p\b" && echo "$p BUSY" || echo "$p free"; done
+```
+
+All four must be free. 🚨 Server tests `TRUNCATE` the database — `DATABASE_URL` must only ever
+point at this disposable stack. If 5432 is already taken by a real Postgres, the container will
+simply fail to bind, which is the safe outcome; the dangerous move at that moment is repointing
+`DATABASE_URL` at the existing server. Change the container's host port instead.
+
+- [ ] **Step 4: Bring up the disposable stack**
 
 ```bash
 docker compose -f .docker/dev/compose.yml --env-file .docker/dev/.env up -d postgres redis mailpit
 ```
 
-Expected: postgres on 5432, redis on 6379, mailpit on 1025/8025. If `.docker/dev/compose.yml`
-or `.env` is missing, copy from the adjacent `*.example` files — both are git-excluded.
+Three services only — `compose.yml` also defines `manticoresearch`, which stays down; that is
+what `AFFINE_INDEXER_ENABLED=false` below is for, and it matches self-host parity. Mailpit's web
+UI at `http://localhost:8025` is where invite emails land.
 
-- [ ] **Step 3: Export the standard test environment**
+Verify rather than trusting `up -d`:
+
+```bash
+docker compose -f .docker/dev/compose.yml --env-file .docker/dev/.env exec -T postgres pg_isready -U affine -d affine
+```
+
+Expected: `accepting connections`. The compose project name is pinned to `affine_dev_services`
+inside the file, so all worktrees share one set of containers and named volumes — you do not get
+a second Postgres per worktree.
+
+- [ ] **Step 5: Export the standard test environment**
 
 ```bash
 export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+export CARGO_HOME="$CONDA_PREFIX/.cargo"
 export DATABASE_URL="postgresql://affine:affine@localhost:5432/affine"
 export REDIS_SERVER_HOST=localhost
 export AFFINE_INDEXER_ENABLED=false
@@ -71,7 +106,7 @@ export AFFINE_INDEXER_ENABLED=false
 `NODE_ENV=test`, `DEPLOYMENT_TYPE=affine` and the `MAILER_*` vars are set by `ava.config.js`
 itself — do not set them here.
 
-- [ ] **Step 4: One-time DB setup (idempotent)**
+- [ ] **Step 6: One-time DB setup (idempotent)**
 
 ```bash
 corepack yarn workspace @affine/server prisma migrate deploy
@@ -79,30 +114,60 @@ corepack yarn workspace @affine/server prisma migrate deploy
 
 Expected: migrations applied, or "No pending migrations to apply."
 
-- [ ] **Step 5: Build the Rust native module**
+- [ ] **Step 7: Install Rust into the `affine` env (once per workstation)**
 
-`yarn install` does **not** build it, and every server spec needs it — `src/base` reaches
-`src/native.ts` transitively, so even the DB-free unit tests in Task 1 fail without it. The
-symptom is `Cannot find module './server-native.<arch>.node'`.
+`yarn install` does **not** build the native module, and every server spec needs it — `src/base`
+reaches `src/native.ts` transitively, so even the DB-free unit tests in Task 1 fail without it.
 
-Requires the Rust toolchain pinned by `rust-toolchain.toml` (**1.97.1** — note the bootstrap's
-toolchain table still says 1.96.0; the pin is authoritative) plus a C/C++ toolchain (MSVC on
-Windows, already present if Visual Studio is installed). If `cargo` is missing, install rustup
-first — `rust-toolchain.toml` then selects the right version automatically.
+conda-forge carries **1.97.1**, the exact version `rust-toolchain.toml` pins (the bootstrap's
+toolchain table still says 1.96.0; the pin is authoritative). Install into the env rather than
+the workstation:
+
+```bash
+micromamba install -y -n affine -c conda-forge rust=1.97.1
+```
+
+Two things to know about this route. First, `rust-toolchain.toml` is a **rustup** mechanism, so a
+conda-installed cargo ignores it — the versions match here by choice, not by enforcement, and
+nothing will warn you if that package is ever upgraded past the pin. Second, `CARGO_HOME`
+defaults to `~/.cargo`; Step 5 points it into the env prefix so the registry cache stays
+contained.
+
+No MSVC setup is required on a machine with Visual Studio: rustc locates the linker on its own,
+with no `vcvars64.bat` or `Enter-VsDevShell`. Verify in seconds rather than discovering it at the
+link step of a long build:
+
+```bash
+cargo --version && (cd "$(mktemp -d)" && cargo init --name linkprobe >/dev/null 2>&1 && cargo build)
+```
+
+Expected: `cargo 1.97.1` and `Finished dev profile`. If instead you get
+``linker `link.exe` not found``, the machine is missing the MSVC x64 C++ toolset — check with
+`vswhere -all -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`
+and install "Desktop development with C++" before continuing.
+
+- [ ] **Step 8: Build the native module**
 
 ```bash
 corepack yarn workspace @affine/server-native build:debug
 ```
 
-`build:debug` rather than `build` (which is `--release --strip`): the debug build is
-substantially faster and nothing here depends on native performance. Expected: a
-`server-native.<arch>.node` file appears in `packages/backend/native/`.
+`build:debug` rather than `build` (which is `--release --strip`): nothing here depends on native
+performance. Expect roughly **3 minutes** cold. If your shell kills it first, just re-run —
+cargo resumes from its cache rather than restarting.
 
 ```bash
-ls packages/backend/native/*.node
+ls -la packages/backend/native/*.node
 ```
 
-- [ ] **Step 6: Confirm the untouched upstream spec passes before you change anything**
+Expected: `server-native.node`, ~130MB. That bare name is correct and needs no renaming —
+`packages/backend/native/index.js` tries `./server-native.node` **first** and only falls back to
+`server-native.x64.node` / `.arm64.node` / `.armv7.node`. (CI renames the artifact per platform,
+which is why you may see the arch-suffixed name in CI logs.) A
+`Cannot find module './server-native.x64.node'` error means the file is absent entirely, not
+misnamed — it is the fallback branch reporting last.
+
+- [ ] **Step 9: Confirm the untouched upstream spec passes before you change anything**
 
 Use `yarn affine`, **not** `yarn workspace`. `"affine": "r affine.ts"` runs through the `r`
 TypeScript loader; invoking AVA via `yarn workspace` bypasses it and fails while loading
@@ -114,7 +179,7 @@ missing file.
 corepack yarn affine @affine/server test 'src/core/quota/__tests__/state.spec.ts'
 ```
 
-Expected: all tests pass. This spec asserts `memberLimit === 10` for `selfhost_free` at lines
+Expected: **11 tests passed**. This spec asserts `memberLimit === 10` for `selfhost_free` at lines
 309 and 312, and it must keep passing untouched through every task below — it is the
 default-behavior regression guard. If it fails here, stop and fix the environment first.
 
