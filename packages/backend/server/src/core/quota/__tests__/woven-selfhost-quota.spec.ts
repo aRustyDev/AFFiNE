@@ -173,10 +173,9 @@ test('a storage floor reaches the persisted user quota projection', async t => {
   });
 });
 
-// The blobs.size column is Postgres `Integer` (32-bit), so a single row cannot hold a
-// 101GB value directly (int32 tops out around 2GB). Split the requested total across
-// multiple <=1GB rows, matching the pattern the upstream-owned state.spec.ts already uses
-// (see its own addBlob loop) to reach multi-GB usage totals. The sum is still exact.
+// Blob.size is Int @db.Integer (schema.prisma:1150), so a single row cannot exceed int4
+// (~2.1GB). Split the total across <=1GB rows; upstream does the same thing by calling its
+// own single-row addBlob in a loop (state.spec.ts:402-404).
 async function addBlob(
   t: ExecutionContext<Context>,
   workspaceId: string,
@@ -206,6 +205,11 @@ test('default (-1): storage past the plan quota makes the workspace readonly', a
 
     t.is(state.storageQuota, BigInt(100 * ONE_GB));
     t.true(state.readonlyReasons.includes('storage_overflow'));
+    t.is(
+      state.usedStorageQuota,
+      BigInt(101 * ONE_GB),
+      'addBlob must persist exactly the requested total, not a rounded-up multiple'
+    );
   });
 });
 
@@ -247,9 +251,10 @@ test('blob floor also reaches the calculator the upload path uses', async t => {
       workspace.id
     );
 
-    t.falsy(
-      checkExceeded(400 * ONE_MB)?.blobQuotaExceeded,
-      '400MB is under the raised per-file limit'
+    t.is(
+      checkExceeded(400 * ONE_MB),
+      undefined,
+      '400MB is under the raised per-file limit, and nothing else is exceeded either'
     );
     t.truthy(
       checkExceeded(600 * ONE_MB)?.blobQuotaExceeded,
