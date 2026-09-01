@@ -101,28 +101,29 @@ the parser saw for each row.
 
 **Create — all fork-owned, no manifest row needed:**
 
-| Path                                                 | Responsibility                                                     |
-| ---------------------------------------------------- | ------------------------------------------------------------------ |
-| `src/core/db-compat/classify.ts`                     | Pure. SQL scrub → statements → tier + hits.                        |
-| `src/core/db-compat/migration-set.ts`                | Resolve the migrations dir; read names and `migration.sql`.        |
-| `src/core/db-compat/db-state.ts`                     | Read `_prisma_migrations` and the user count.                      |
-| `src/core/db-compat/identity.ts`                     | Read/write the `$deployment` stamp; evaluate identity.             |
-| `src/core/db-compat/env.ts`                          | The three `process.env` reads, in one place.                       |
-| `src/core/db-compat/compat.ts`                       | Pure. Inputs → `CompatReport` with a verdict.                      |
-| `src/core/db-compat/service.ts`                      | `DbCompatService`: `report()`, `check()`, and the pure `decide()`. |
-| `src/core/db-compat/guard.ts`                        | `DbCompatGuard` — `OnApplicationBootstrap`, refuses to listen.     |
-| `src/core/db-compat/render.ts`                       | Format a `CompatReport` as operator-readable text.                 |
-| `src/core/db-compat/index.ts`                        | `DbCompatModule`, `DbCompatGuardModule`, public types.             |
-| `src/core/db-compat/cli-module.ts`                   | `DbCompatCliModule` — the config+prisma-only context (T4).         |
-| `src/core/db-compat/__tests__/render.spec.ts`        | T4 — report formatting, incl. UNKNOWN vs POSSIBLE.                 |
-| `src/core/db-compat/README.md`                       | Operator-facing docs for the three env knobs (T6).                 |
-| `src/core/db-compat/__tests__/classify.spec.ts`      | T1 — rules, scrubbing, corpus anchors and totals.                  |
-| `src/core/db-compat/__tests__/migration-set.spec.ts` | T1 — dir resolution and reads.                                     |
-| `src/core/db-compat/__tests__/compat.spec.ts`        | T2 — the whole verdict table, pure.                                |
-| `src/core/db-compat/__tests__/db-state.spec.ts`      | T2 — real Postgres.                                                |
-| `src/core/db-compat/__tests__/identity.spec.ts`      | T3 — real Postgres; stamp round-trip, inertness.                   |
-| `src/core/db-compat/__tests__/service.spec.ts`       | T3 — adoption gate decisions.                                      |
-| `src/core/db-compat/__tests__/guard.spec.ts`         | T5 — guard refuses/permits/bypasses.                               |
+| Path                                                 | Responsibility                                                                           |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `src/core/db-compat/classify.ts`                     | Pure. SQL scrub → statements → tier + hits.                                              |
+| `src/core/db-compat/migration-set.ts`                | Resolve the migrations dir; read names and `migration.sql`.                              |
+| `src/core/db-compat/db-state.ts`                     | Read `_prisma_migrations` and the user count.                                            |
+| `src/core/db-compat/identity.ts`                     | Read/write the `$deployment` stamp; evaluate identity.                                   |
+| `src/core/db-compat/env.ts`                          | The three `process.env` reads, in one place.                                             |
+| `src/core/db-compat/prisma-errors.ts`                | `isUndefinedTable` — shared by `db-state.ts` and `identity.ts` (T3).                     |
+| `src/core/db-compat/compat.ts`                       | Pure. Inputs → `CompatReport` with a verdict.                                            |
+| `src/core/db-compat/service.ts`                      | `DbCompatService`: `report()`, pure `check()`, `stamp()` (D17), and the pure `decide()`. |
+| `src/core/db-compat/guard.ts`                        | `DbCompatGuard` — `OnApplicationBootstrap`, refuses to listen.                           |
+| `src/core/db-compat/render.ts`                       | Format a `CompatReport` as operator-readable text.                                       |
+| `src/core/db-compat/index.ts`                        | `DbCompatModule`, `DbCompatGuardModule`, public types.                                   |
+| `src/core/db-compat/cli-module.ts`                   | `DbCompatCliModule` — the config+prisma-only context (T4).                               |
+| `src/core/db-compat/__tests__/render.spec.ts`        | T4 — report formatting, incl. UNKNOWN vs POSSIBLE.                                       |
+| `src/core/db-compat/README.md`                       | Operator-facing docs for the three env knobs (T6).                                       |
+| `src/core/db-compat/__tests__/classify.spec.ts`      | T1 — rules, scrubbing, corpus anchors and totals.                                        |
+| `src/core/db-compat/__tests__/migration-set.spec.ts` | T1 — dir resolution and reads.                                                           |
+| `src/core/db-compat/__tests__/compat.spec.ts`        | T2 — the whole verdict table, pure.                                                      |
+| `src/core/db-compat/__tests__/db-state.spec.ts`      | T2 — real Postgres.                                                                      |
+| `src/core/db-compat/__tests__/identity.spec.ts`      | T3 — real Postgres; stamp round-trip, inertness.                                         |
+| `src/core/db-compat/__tests__/service.spec.ts`       | T3 — adoption gate decisions.                                                            |
+| `src/core/db-compat/__tests__/guard.spec.ts`         | T5 — guard refuses/permits/bypasses.                                                     |
 
 **Modify — upstream-owned, each needs a `scripts/woven-patch-manifest.md` row:**
 
@@ -1393,6 +1394,24 @@ git add packages/backend/server/src/core/db-compat/db-state.ts packages/backend/
 
 ## Task 3: Identity stamp, env knobs, and the adoption gate
 
+> **LANDED 2026-09-01 — the code blocks below are the PRE-REVIEW design; the committed source is
+> the authority.** Review found a **showstopper**: the gate crashed on every fresh install, because
+> it runs before `prisma migrate deploy` and `readStamp`/`writeStamp` both throw `P2021` against a
+> database with no `app_configs`. Divergences (`c318be0684` → `e2a03f3045` → `9e72b37cdc` →
+> `54935b778b`):
+>
+> - **`check()` is pure and a new `stamp()` records, run after migrations** (D17). `check()` no
+>   longer takes a `mutate` option.
+> - New shared `prisma-errors.ts` (`isUndefinedTable`, lifted out of `db-state.ts`); `readStamp`
+>   degrades a missing `app_configs` to "no stamp".
+> - `readStamp` returns **`{ stamp, corrupt }`**, `IdentityState` gains a `corrupt` arm, and
+>   `CompatInput` gains an optional `stampCorrupt` — an unreadable stamp REFUSES rather than being
+>   overwritten (D18).
+> - `parseStamp` validates every field, not just two.
+> - `decide()` treats `populated === false` as `fresh-install` (D19) and returns
+>   `bootMayContinue` (D20).
+> - `flag()` trims and lowercases; the adopt contract is `options.adopt === true || adoptRequested()`.
+
 **Files:**
 
 - Create: `packages/backend/server/src/core/db-compat/env.ts`
@@ -2323,7 +2342,7 @@ dbCommand
     await withMinimalApp(logger, async app => {
       const decision = await app
         .get(DbCompatService)
-        .check({ mutate: true, adopt: options.adopt });
+        .check({ adopt: options.adopt });
 
       process.stdout.write(renderReport(decision.report) + '\n');
 
@@ -2340,7 +2359,30 @@ dbCommand
       );
     });
   });
+
+// Separate from `check` because the stamp lives in `app_configs`, which does not
+// exist on a fresh install until `prisma migrate deploy` has run — and the gate
+// must run BEFORE that to be worth anything. See D17. Idempotent, so the
+// predeploy script can call it unconditionally on every deploy.
+dbCommand
+  .command('stamp')
+  .description('record the deployment stamp; run AFTER migrations. Idempotent.')
+  .action(async () => {
+    await withMinimalApp(logger, async app => {
+      await app.get(DbCompatService).stamp();
+    });
+  });
 ```
+
+Two deliberate asymmetries with `check`:
+
+- **No `--adopt` flag.** `stamp()` reads `AFFINE_DB_ADOPT` from the environment to decide whether to
+  record the adoption as `explicit` or `implicit`. That is the same reasoning as D8: the automated
+  caller is the predeploy initContainer, which can be given an env var through the chart's
+  `extraEnv` but cannot be given argv. An operator consenting to an adoption should export the
+  variable, not pass a flag, or the recorded `adoptionMode` will read `implicit`.
+- **No exit-code handling.** `stamp()` declines to write when the verdict refuses and logs why.
+  It does not need to gate anything, because `check` already did — before any migration ran.
 
 - [ ] **Step 7: Verify the CLI end to end against the real database**
 
