@@ -32,7 +32,7 @@ Run every command from the repository root unless a step says otherwise.
 **Toolchain.** This repo's server package uses yarn workspaces. The two command forms you need:
 
 ```bash
-yarn workspace @affine/server ava <path-to-spec>
+yarn affine @affine/server test <path-to-spec>
 ```
 
 ```bash
@@ -287,7 +287,7 @@ test('anchor: function-body-only DDL stays EXPAND', t => {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/classify.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/classify.spec.ts`
 
 Expected: FAIL — every test errors on an unresolved import of `../classify`.
 
@@ -494,7 +494,7 @@ export function classifyDdl(sql: string): DdlClassification {
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/classify.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/classify.spec.ts`
 
 Expected: PASS, 14 tests. If `corpus tiers exactly as measured` fails, **do not adjust the
 expected numbers** — re-run the grounding measurement and reconcile, because a change there means
@@ -571,7 +571,7 @@ test('the real repository migrations directory resolves and has 117 entries', t 
 
 - [ ] **Step 7: Run to verify failure**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/migration-set.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/migration-set.spec.ts`
 
 Expected: FAIL — unresolved import of `../migration-set`.
 
@@ -648,7 +648,7 @@ export function loadMigrationSet(
 
 - [ ] **Step 9: Run to verify pass**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/migration-set.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/migration-set.spec.ts`
 
 Expected: PASS, 6 tests.
 
@@ -862,7 +862,7 @@ test('identity mismatch outranks DB_AHEAD — the wrong database is the better m
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/compat.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/compat.spec.ts`
 
 Expected: FAIL — unresolved import of `../compat`.
 
@@ -1104,7 +1104,7 @@ export function buildReport(input: CompatInput): CompatReport {
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/compat.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/compat.spec.ts`
 
 Expected: PASS, 13 tests.
 
@@ -1166,7 +1166,7 @@ test('readDbState reports populated from the user count', async t => {
 
 - [ ] **Step 7: Run to verify failure**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/db-state.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/db-state.spec.ts`
 
 Expected: FAIL — unresolved import of `../db-state`.
 
@@ -1263,7 +1263,7 @@ export async function readDbState(db: PrismaClient): Promise<DbState> {
 
 - [ ] **Step 9: Run to verify pass**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/db-state.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/db-state.spec.ts`
 
 Expected: PASS, 3 tests. Requires the database from **Before you start**.
 
@@ -1402,7 +1402,7 @@ test('evaluateIdentity classifies absent, unchecked, match and mismatch', t => {
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/identity.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/identity.spec.ts`
 
 Expected: FAIL — `readStamp` / `writeStamp` are not exported implementations.
 
@@ -1501,7 +1501,7 @@ Add `Prisma` to the existing import so it reads
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/identity.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/identity.spec.ts`
 
 Expected: PASS, 7 tests. The two inertness tests are the important ones — if either fails, the
 `$` prefix has been changed or `override()` no longer ignores unknown config modules, and D6 needs
@@ -1656,7 +1656,7 @@ test('UNREADABLE refuses when mutating and is reported as undetermined', t => {
 
 - [ ] **Step 7: Run to verify failure**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/service.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/service.spec.ts`
 
 Expected: FAIL — unresolved import of `../service`.
 
@@ -1873,7 +1873,7 @@ Step 8 restores the render export; Task 5 Step 4 restores the guard.
 
 - [ ] **Step 9: Run to verify pass**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/service.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/service.spec.ts`
 
 Expected: PASS, 12 tests (the `for` loop contributes 4).
 
@@ -1967,7 +1967,7 @@ test('states when identity is unchecked', t => {
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/render.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/render.spec.ts`
 
 Expected: FAIL — `renderReport` is not exported (the file is still the `export {}` stub).
 
@@ -2042,7 +2042,7 @@ export function renderReport(report: CompatReport): string {
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/render.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/render.spec.ts`
 
 Expected: PASS, 4 tests.
 
@@ -2282,7 +2282,7 @@ test('the bypass suppresses the throw and logs at ERROR every time', t => {
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/guard.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/guard.spec.ts`
 
 Expected: FAIL — `enforce` is not exported (the file is still the `export {}` stub).
 
@@ -2378,7 +2378,7 @@ Remove the `// TODO(affine-tc6.4/.5)` markers so the `DbCompatGuard` import and 
 
 - [ ] **Step 5: Run to verify pass**
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/__tests__/guard.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/__tests__/guard.spec.ts`
 
 Expected: PASS, 4 tests.
 
@@ -2396,7 +2396,7 @@ the CLI would make `db check` unable to run when it is most needed (design D10/D
 
 - [ ] **Step 7: Verify the existing AppModule-importing tests still pass**
 
-Run: `yarn workspace @affine/server ava src/__tests__/version.spec.ts src/__tests__/nestjs/throttler.spec.ts`
+Run: `yarn affine @affine/server test src/__tests__/version.spec.ts src/__tests__/nestjs/throttler.spec.ts`
 
 Expected: PASS. These import `AppModule`; if they fail, the `env.testing` short-circuit in
 `guard.ts` is missing or misspelled.
@@ -2476,7 +2476,7 @@ Run: `scripts/woven-manifest-guard.sh`
 
 Expected: exit 0.
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/`
+Run: `yarn affine @affine/server test src/core/db-compat/`
 
 Expected: PASS, all specs.
 
@@ -2597,7 +2597,7 @@ Run: `yarn lint:format` and `scripts/woven-manifest-guard.sh`
 
 Expected: both clean.
 
-Run: `yarn workspace @affine/server ava src/core/db-compat/ src/__tests__/version.spec.ts src/core/config/__tests__/service.spec.ts`
+Run: `yarn affine @affine/server test src/core/db-compat/ src/__tests__/version.spec.ts src/core/config/__tests__/service.spec.ts`
 
 Expected: PASS. `core/config/__tests__/service.spec.ts` is included on purpose — it exercises
 `loadDbOverrides()`, the mechanism the `$deployment` stamp relies on staying inert.
