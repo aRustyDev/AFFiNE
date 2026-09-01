@@ -262,3 +262,26 @@ test('blob floor also reaches the calculator the upload path uses', async t => {
     );
   });
 });
+
+test('cloud deployment: floors are inert', async t => {
+  // NOT wrapped in asSelfhosted — ava.config.js sets DEPLOYMENT_TYPE=affine, i.e. cloud.
+  setFloors(t, { seat: 1000, storage: 900 * ONE_GB, blob: 500 * ONE_MB });
+  const { workspace } = await createWorkspace(t);
+  await addAcceptedMembers(t, workspace.id, 10);
+
+  const state = await t.context.state.reconcileWorkspaceQuotaState(
+    workspace.id
+  );
+
+  // Exact values from plan_catalog's default ('free') arm — asserting mere inequality with the
+  // floor would also pass on garbage or on undefined.
+  t.is(state.plan, 'free');
+  t.is(state.seatLimit, 3);
+  t.is(state.storageQuota, BigInt(10 * ONE_GB));
+  t.is(state.blobLimit, BigInt(10 * ONE_MB));
+
+  // The same 11 members that a seat floor rescues on self-hosted must stay over capacity here.
+  t.is(state.memberCount, 11);
+  t.is(state.overcapacityMemberCount, 8);
+  t.true(state.readonlyReasons.includes('member_overflow'));
+});
