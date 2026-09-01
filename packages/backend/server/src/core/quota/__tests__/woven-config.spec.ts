@@ -19,6 +19,15 @@ const planQuota = () => ({
   historyPeriod: 30 * 24 * 60 * 60,
 });
 
+// seatLimit is `seatLimit?: number` on the real ResolvedQuota, so model "no seats granted"
+// as the property being absent from a type that permits it — not absent from the type.
+const seatlessQuota = (): {
+  blobLimit: number;
+  storageQuota: number;
+  historyPeriod: number;
+  seatLimit?: number;
+} => ({ blobLimit: 1, storageQuota: 2, historyPeriod: 3 });
+
 test('all -1 is an exact identity, including the object shape', t => {
   const quota = planQuota();
   const result = applyWovenSelfhostQuota(quota, inherit, true);
@@ -27,7 +36,7 @@ test('all -1 is an exact identity, including the object shape', t => {
 });
 
 test('inheriting preserves an absent seatLimit as absent', t => {
-  const quota = { blobLimit: 1, storageQuota: 2, historyPeriod: 3 };
+  const quota = seatlessQuota();
   const result = applyWovenSelfhostQuota(quota, inherit, true);
 
   t.false('seatLimit' in result && result.seatLimit !== undefined);
@@ -54,7 +63,7 @@ test('a floor below the plan value is a no-op — it never lowers a licensed pla
 });
 
 test('a seat floor applies when the plan grants no seats at all', t => {
-  const quota = { blobLimit: 1, storageQuota: 2, historyPeriod: 3 };
+  const quota = seatlessQuota();
   const result = applyWovenSelfhostQuota(
     quota,
     { ...inherit, selfhostSeatLimit: 1000 },
