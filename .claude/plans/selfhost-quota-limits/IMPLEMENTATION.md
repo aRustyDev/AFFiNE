@@ -1020,6 +1020,24 @@ git add packages/backend/server/src/core/quota/__tests__/woven-selfhost-quota.sp
 git commit -m "test(woven): cover self-host storage and blob floors (affine-vap)"
 ```
 
+### ✅ Task 3 as-built — one datatype correction
+
+**DONE** in commits `52e1a98e0c` and `82dc75dbfb`. All four tests passed on the first run, exactly as predicted — the
+seam already covered storage, blob, and the upload calculator, which independently confirms Task 2
+wired both reconcile sites. Suite: **38 tests** (11 `state.spec.ts` byte-identical to the upstream
+baseline, 19 `woven-config.spec.ts`, 8 `woven-selfhost-quota.spec.ts`). No production code changed.
+
+**The `addBlob` helper above is wrong as written.** `Blob.size` is `Int @db.Integer`
+(`schema.prisma:1150`) — int4, max 2,147,483,647 — and `101 * ONE_GB` is 108,447,924,224, a ~50×
+overflow. A single row that large fails before reaching any quota logic. The fix is to split the
+requested total across multiple ≤1GB rows so the sum is still exact, which is what upstream's own
+`state.spec.ts` does for its `storage_overflow` test (`addBlob(t, workspace, 'blob-${index}',
+ONE_GB)` in a loop, `:403`). The call signature and every assertion stay identical.
+
+Both APIs the plan flagged as guesses turned out correct: `models.blob.upsert` takes
+`{workspaceId, key, mime, size}`, and `getWorkspaceQuotaCalculator` resolves to
+`checkExceeded(size)` returning `{storageQuotaExceeded, blobQuotaExceeded}` or `undefined`.
+
 ---
 
 ## Task 4: Cloud inertness and the user projection
@@ -1032,33 +1050,41 @@ git commit -m "test(woven): cover self-host storage and blob floors (affine-vap)
 
 Append to `woven-selfhost-quota.spec.ts`:
 
+**Two corrections to this task, made before it was dispatched.**
+
+First, the original second test (`'the user projection is floored too …'`) is **dropped as
+redundant**: Task 2's review already added `'a storage floor reaches the persisted user quota
+projection'`, which pins the same seam more strongly — it reads the row back with `findUnique`
+rather than trusting the value `reconcileUserQuotaState` returns.
+
+Second, the original cloud test asserted with `t.not(...)`, which passes on _anything_ other than
+the floor — including garbage, `undefined`, or a wrong-but-plausible value. Assert the exact cloud
+`free` values from `plan_catalog`'s default arm instead, and make the same over-capacity setup as
+the self-hosted test so the test states the real point: on cloud the floor does **not** rescue the
+workspace.
+
 ```ts
 test('cloud deployment: floors are inert', async t => {
+  // NOT wrapped in asSelfhosted — ava.config.js sets DEPLOYMENT_TYPE=affine, i.e. cloud.
   setFloors(t, { seat: 1000, storage: 900 * ONE_GB, blob: 500 * ONE_MB });
   const { workspace } = await createWorkspace(t);
   await addAcceptedMembers(t, workspace.id, 10);
 
-  // NOT wrapped in asSelfhosted — ava.config.js sets DEPLOYMENT_TYPE=affine, i.e. cloud.
   const state = await t.context.state.reconcileWorkspaceQuotaState(
     workspace.id
   );
 
-  t.not(state.plan, 'selfhost_free');
-  t.not(state.seatLimit, 1000, 'the seat floor must not apply on cloud');
-  t.not(state.storageQuota, BigInt(900 * ONE_GB));
-  t.not(state.blobLimit, BigInt(500 * ONE_MB));
-});
+  // Exact values from plan_catalog's default ('free') arm — asserting mere inequality with the
+  // floor would also pass on garbage or on undefined.
+  t.is(state.plan, 'free');
+  t.is(state.seatLimit, 3);
+  t.is(state.storageQuota, BigInt(10 * ONE_GB));
+  t.is(state.blobLimit, BigInt(10 * ONE_MB));
 
-test('the user projection is floored too, so it cannot contradict the workspace', async t => {
-  await asSelfhosted(async () => {
-    setFloors(t, { seat: INHERIT, storage: 900 * ONE_GB, blob: INHERIT });
-    const { owner } = await createWorkspace(t);
-
-    const userState = await t.context.state.reconcileUserQuotaState(owner.id);
-
-    t.is(userState.plan, 'selfhost_free');
-    t.is(userState.storageQuota, BigInt(900 * ONE_GB));
-  });
+  // The same 11 members that a seat floor rescues on self-hosted must stay over capacity here.
+  t.is(state.memberCount, 11);
+  t.is(state.overcapacityMemberCount, 8);
+  t.true(state.readonlyReasons.includes('member_overflow'));
 });
 ```
 
@@ -1068,8 +1094,7 @@ test('the user projection is floored too, so it cannot contradict the workspace'
 corepack yarn affine @affine/server test 'src/core/quota/__tests__/woven-selfhost-quota.spec.ts'
 ```
 
-Expected: 9 tests passed. The user-projection test is what Task 2 step 5 exists for — if it
-fails, the user reconcile site was not patched.
+Expected: 9 tests passed.
 
 - [ ] **Step 3: Run the gate**
 
@@ -1085,8 +1110,22 @@ which matters because a new config module is surfaced in the admin app config.
 
 ```bash
 git add packages/backend/server/src/core/quota/__tests__/woven-selfhost-quota.spec.ts
-git commit -m "test(woven): assert cloud inertness and user projection floors (affine-vap)"
+git commit -m "test(woven): assert the floors are inert on cloud deployments (affine-vap)"
 ```
+
+### ✅ Task 4 as-built — clean, and the first full gate run
+
+**DONE** in commit `404af6953e`. One test, no adaptation needed: the catalog values were verified
+against `entitlement.rs:455-464` (`name: "free"`, `blob_limit: 10 * ONE_MB`,
+`storage_quota: 10 * ONE_GB`, `member_limit: Some(3)`) and matched the plan exactly, so the
+assertions are pinned to the catalog rather than to observed output. Suite: **39 tests**.
+
+`scripts/woven-ci-min.sh 'src/core/quota/__tests__/*.spec.ts'` passed every step —
+typecheck (3s), `lint:ox` (189s), **codegen-drift (27s)**, server AVA (38s, 39 tests). The
+codegen-drift pass is the meaningful one: it independently confirms Task 2's regenerated
+`.docker/selfhost/schema.json` and `packages/frontend/admin/src/config.json` are committed in the
+state genconfig produces, which is exactly the CI failure that would otherwise have surfaced only
+after the PR was opened.
 
 ---
 
@@ -1137,9 +1176,24 @@ Expected: exit 0, `✔ every upstream-owned divergence is manifested, and every 
 scripts/woven-manifest-guard.sh --outbound --head HEAD; echo "exit: $?"
 ```
 
-Expected: **exit 1** — it must refuse this branch. A `0` here means the category string is
-wrong and the leak guard would let this patch reach an upstream-directed branch. This is a
-positive assertion, not a formality.
+Expected: exit 1 **and `state.ts` named in the LEAKED list**.
+
+**The exit code alone proves nothing on this fork — corrected during Task 5.**
+`packages/backend/server/src/plugins/oauth/providers/oidc.ts` is a pre-existing FORK-LOCAL CORE
+PATCH that diverged at `112c10c4d9`, before this branch existed, so `--outbound` exits 1 on _any_
+branch of this fork whether or not our row is correct. The original version of this step asserted
+only the exit code and called that "a positive assertion, not a formality" — it was exactly the
+formality it warned about.
+
+Assert the naming instead:
+
+```bash
+scripts/woven-manifest-guard.sh --outbound --head HEAD 2>&1 | grep -c 'core/quota/state.ts'
+```
+
+Expected: `1`. If `state.ts` is absent from that list while the guard still exits 1 on `oidc.ts`,
+the category string is wrong and the leak guard does **not** cover this patch — the precise
+failure the row exists to prevent, and one the exit code cannot see.
 
 - [ ] **Step 5: Confirm every changed line in the upstream-owned file is marked**
 
@@ -1156,6 +1210,39 @@ two changed lines those comments introduce. Four regions total, no more.
 git add scripts/woven-patch-manifest.md
 git commit -m "docs(woven): manifest the quota state.ts core patch (affine-vap)"
 ```
+
+### ✅ Task 5 as-built — and this plan's verification step was wrong
+
+**DONE** in commit `7cc79b7624`. Inbound guard exits 0 (`6 upstream-owned · 6 manifest row(s)`,
+"every upstream-owned divergence is manifested, and every row resolves"). Before the row it named
+`state.ts` and **only** `state.ts` — not the three fork-owned files, not the two generated
+artifacts — confirming both the baseline pin and Task 2's rows.
+
+**The correction, which is the useful part.** This plan told the implementer to prove causality by
+flipping the category to `**ADDITIVE**` and confirming the outbound guard then exits 0. That test
+cannot pass on this fork: `plugins/oauth/providers/oidc.ts` is a pre-existing FORK-LOCAL CORE PATCH
+that diverged at `112c10c4d9`, so `--outbound` exits 1 on _any_ branch here regardless of our row.
+The implementer noticed, declined to declare success on a test that couldn't run, and substituted a
+better one — whether `state.ts` **appears in or disappears from** the named LEAKED list. Under
+`ADDITIVE` it disappeared while the exit code stayed 1; restored, it reappeared.
+
+So the exit code was never evidence, and this plan's AC5 asserted exactly that. Verified directly:
+
+```
+✗ FORK-LOCAL CORE PATCH on an upstream-directed change set:
+✗     packages/backend/server/src/core/quota/state.ts
+✗     packages/backend/server/src/plugins/oauth/providers/oidc.ts
+```
+
+The criterion is now "names `state.ts`", here and in `PLAN.md` and on the bead. Worth generalising:
+on a fork that already carries one never-upstream patch, _no_ whole-branch outbound check can prove
+a _new_ patch is covered. Only the per-file naming can.
+
+Marker discipline confirmed read-only: 5 markers across 4 regions, every changed line inside a
+marked region. Two changed lines are not adjacent to their marker — the trailing comma on
+`private readonly event: EventBus,` and `...this.quotaData(quota),` — both inside their region, and
+oxlint's `no-unused-vars` backstops the one that matters if a future conflict resolver drops half
+the patch.
 
 ---
 
