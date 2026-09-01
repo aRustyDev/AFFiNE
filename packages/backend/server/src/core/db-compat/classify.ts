@@ -84,12 +84,16 @@ const RULES: Rule[] = [
  * possibly-huge blanked-to-EOF file. */
 const UNTERMINATED_PREVIEW_LEN = 200;
 
-interface ScrubResult {
-  text: string;
-  unterminated: boolean;
-  /** Where the unterminated construct began, if any. */
-  at: { line: number; index: number } | null;
-}
+/**
+ * A discriminated union so the "unterminated implies a location" invariant is
+ * enforced by the type checker rather than by convention: there is no way to
+ * construct the `unterminated: true` branch without also supplying `at`, so a
+ * caller (classifyDdl) can never end up with `unterminated: true` and nothing
+ * to build the synthetic `unparseable` hit from.
+ */
+type ScrubResult =
+  | { text: string; unterminated: false }
+  | { text: string; unterminated: true; at: { line: number; index: number } };
 
 /**
  * Blank out comments, dollar-quoted bodies, string literals and double-quoted
@@ -179,16 +183,27 @@ function scrubDetailed(sql: string): ScrubResult {
 
     if (sql[i] === "'") {
       const start = i;
+      // Backslash is only an escape character inside an E-prefixed literal
+      // (E'...'). With standard_conforming_strings = on — the default since
+      // Postgres 9.1 — a plain '...' literal treats \ as an ordinary
+      // character, so 'a\' is already a complete, terminated string. Treating
+      // backslash as an escape unconditionally made the scanner consume the
+      // closing quote and run to EOF on ordinary content like a Windows path
+      // default ('C:\'), a false `unparseable` alarm in the tier that gates.
+      const before = sql[start - 1];
+      const beforeThat = sql[start - 2];
+      const isEscapeString =
+        (before === 'E' || before === 'e') &&
+        !/[A-Za-z0-9_]/.test(beforeThat ?? '');
       let k = i + 1;
       let closed = false;
       while (k < sql.length) {
-        if (sql[k] === '\\' && k + 1 < sql.length) {
-          // Backslash-escape, e.g. inside an E'...' literal.
+        if (isEscapeString && sql[k] === '\\' && k + 1 < sql.length) {
           k += 2;
           continue;
         }
         if (sql[k] === "'" && sql[k + 1] === "'") {
-          // Doubled quote escapes a literal quote.
+          // Doubled quote escapes a literal quote in both literal forms.
           k += 2;
           continue;
         }
@@ -236,7 +251,13 @@ function scrubDetailed(sql: string): ScrubResult {
     i++;
   }
 
-  return { text: out, unterminated, at };
+  // `at` is always set together with `unterminated` inside markUnterminated,
+  // so this check never actually diverges from `unterminated` alone — it's
+  // written as a narrowing check rather than a non-null assertion so the
+  // return type stays the enforced discriminated union above.
+  return unterminated && at
+    ? { text: out, unterminated: true, at }
+    : { text: out, unterminated: false };
 }
 
 export function scrubSql(sql: string): string {
@@ -292,6 +313,10 @@ function splitScrubbedStatements(scrubbed: string): SqlStatement[] {
 /**
  * Scrub then split raw SQL into statements. Statement-level rather than
  * per-line so a clause split across lines still matches; see grounding G2c.
+ *
+ * This intentionally does not surface `unterminated` — a caller that needs it
+ * for a safety decision must call `classifyDdl`, the entry point for that.
+ * Exported here only because the tests use it directly for line attribution.
  */
 export function splitStatements(sql: string): SqlStatement[] {
   return splitScrubbedStatements(scrubDetailed(sql).text);
@@ -314,7 +339,10 @@ export function classifyDdl(sql: string): DdlClassification {
     }
   }
 
-  if (scrubbed.unterminated && scrubbed.at) {
+  if (scrubbed.unterminated) {
+    // The discriminated union guarantees `scrubbed.at` exists here — see
+    // ScrubResult — so this can never silently skip the synthetic hit and
+    // leave `unterminated: true` paired with a non-BLOCKING tier.
     const remainder = sql.slice(scrubbed.at.index).replace(/\s+/g, ' ').trim();
     hits.push({
       tier: 'BLOCKING',

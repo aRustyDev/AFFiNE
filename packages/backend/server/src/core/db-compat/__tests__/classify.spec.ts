@@ -212,6 +212,41 @@ test('well-formed SQL is not flagged unterminated', t => {
   t.false(unterminated);
 });
 
+test('a trailing backslash in a plain (non-E-prefixed) literal is not an escape', t => {
+  // standard_conforming_strings = on (the default since Postgres 9.1) means a
+  // backslash in a plain '...' literal is an ordinary character, not an
+  // escape — so 'a\' is already a complete, terminated string. Only an
+  // E-prefixed literal (E'...') honours backslash escapes.
+  const { tier, hits, unterminated } = classifyDdl(
+    "INSERT INTO t VALUES ('a\\'); DROP TABLE b;"
+  );
+  t.false(unterminated);
+  t.is(tier, 'BLOCKING');
+  t.true(hits.some(h => h.rule === 'drop-table'));
+  t.false(hits.some(h => h.rule === 'unparseable'));
+});
+
+test('a path-shaped default with a trailing backslash is not an escape', t => {
+  const { unterminated } = classifyDdl(
+    "ALTER TABLE t ALTER COLUMN p SET DEFAULT 'C:\\';"
+  );
+  t.false(unterminated);
+});
+
+test('unterminated always implies BLOCKING (issue 2 hardening)', t => {
+  const unterminatedCases = [
+    "SELECT * FROM t WHERE x = 'abc",
+    'ALTER TABLE "foo ADD COLUMN x TEXT;',
+    '/* never closes\nCREATE TABLE a ();',
+    'CREATE FUNCTION f() RETURNS void AS $$ BEGIN NULL; END;',
+  ];
+  for (const sql of unterminatedCases) {
+    const { tier, unterminated } = classifyDdl(sql);
+    t.true(unterminated, sql);
+    t.is(tier, 'BLOCKING', sql);
+  }
+});
+
 // --- issue 7: hit statement text must not be truncated ----------------------
 
 test('a hit statement is not truncated even when long (issue 7)', t => {
