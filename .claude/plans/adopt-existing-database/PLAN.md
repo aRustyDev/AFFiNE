@@ -891,8 +891,6 @@ First create `packages/backend/server/src/core/db-compat/identity.ts` with the t
 evaluator only. The Prisma reads and writes are added in Task 3.
 
 ```ts
-import type { PrismaClient } from '@prisma/client';
-
 /**
  * `app_configs` id for the deployment stamp.
  *
@@ -939,15 +937,10 @@ export function evaluateIdentity(
     ? { kind: 'match', stamp }
     : { kind: 'mismatch', stamp, configured };
 }
-
-// Prisma-backed read/write are added in Task 3.
-export declare function readStamp(
-  db: PrismaClient
-): Promise<DeploymentStamp | null>;
 ```
 
-Remove that trailing `declare` line in Task 3 Step 3 when the real implementation lands. It exists
-only so this file type-checks on its own now.
+At this point `identity.ts` is **pure** — types plus one function, no Prisma import. Task 3 adds
+`readStamp` / `writeStamp` and the `@prisma/client` import then, so nothing here needs a stub.
 
 Then create `packages/backend/server/src/core/db-compat/compat.ts`:
 
@@ -1497,8 +1490,12 @@ export function buildRef(): { version: string; buildSha: string } {
 }
 ```
 
-Now edit `identity.ts`: delete the trailing `export declare function readStamp(...)` line added in
-Task 2, and append the real implementations.
+Now edit `identity.ts` — it is pure types plus `evaluateIdentity` after Task 2. Add the Prisma
+import at the top and append the real implementations:
+
+```ts
+import { type Prisma, type PrismaClient } from '@prisma/client';
+```
 
 ```ts
 function parseStamp(value: unknown): DeploymentStamp | null {
@@ -1536,9 +1533,6 @@ export async function writeStamp(
   });
 }
 ```
-
-Add `Prisma` to the existing import so it reads
-`import { type Prisma, type PrismaClient } from '@prisma/client';`.
 
 - [ ] **Step 4: Run to verify pass**
 
