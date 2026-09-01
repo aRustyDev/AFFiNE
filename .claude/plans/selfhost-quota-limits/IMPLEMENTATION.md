@@ -183,6 +183,32 @@ Expected: **11 tests passed**. This spec asserts `memberLimit === 10` for `selfh
 309 and 312, and it must keep passing untouched through every task below — it is the
 default-behavior regression guard. If it fails here, stop and fix the environment first.
 
+### Known environment flake — do not chase it
+
+On Windows the AVA child process intermittently dies during native-module teardown with
+`STATUS_ACCESS_VIOLATION` (exit `0xC0000005` / `3221225477`). It strikes at random points,
+including before any assertion in the spec under test has run, and re-running passes cleanly.
+Observed repeatedly during Task 1 on code that was already green.
+
+Distinguishing it from a real failure: a real failure names a spec and an assertion; this one
+reports a non-zero child exit with no failed assertion. If you see the latter, re-run once
+before investigating. **Do not** treat it as evidence about your change, and do not add retries
+or `--serial` tweaks to work around it — it is pre-existing and out of scope for `affine-vap`.
+Tracked as bead `affine-dqx`.
+
+### Stale `.tsbuildinfo` fabricates typecheck errors
+
+`yarn typecheck` is `tsc -b`, which is incremental. A stale cache in this worktree produced a
+phantom `TS2578: Unused '@ts-expect-error' directive` in
+`src/__tests__/mocks/eventbus.mock.ts` — a file nobody had touched. It vanished after:
+
+```bash
+./node_modules/.bin/tsc -b tsconfig.json --clean
+```
+
+So before believing a typecheck error in a file your task never touched, clean and re-run. If it
+survives a clean build, it is real.
+
 ---
 
 ## Task 1: The config module and the pure floor helper
@@ -217,6 +243,17 @@ const planQuota = () => ({
   historyPeriod: 30 * 24 * 60 * 60,
 });
 
+// seatLimit is `seatLimit?: number` on the real ResolvedQuota, so model "no seats granted"
+// as the property being absent from a type that permits it — not absent from the type. An
+// inferred object literal without the key makes `result.seatLimit` a TS2339 error, and the
+// gate's first step is `tsc -b`.
+const seatlessQuota = (): {
+  blobLimit: number;
+  storageQuota: number;
+  historyPeriod: number;
+  seatLimit?: number;
+} => ({ blobLimit: 1, storageQuota: 2, historyPeriod: 3 });
+
 test('all -1 is an exact identity, including the object shape', t => {
   const quota = planQuota();
   const result = applyWovenSelfhostQuota(quota, inherit, true);
@@ -225,8 +262,7 @@ test('all -1 is an exact identity, including the object shape', t => {
 });
 
 test('inheriting preserves an absent seatLimit as absent', t => {
-  const quota = { blobLimit: 1, storageQuota: 2, historyPeriod: 3 };
-  const result = applyWovenSelfhostQuota(quota, inherit, true);
+  const result = applyWovenSelfhostQuota(seatlessQuota(), inherit, true);
 
   t.false('seatLimit' in result && result.seatLimit !== undefined);
 });
@@ -252,9 +288,8 @@ test('a floor below the plan value is a no-op — it never lowers a licensed pla
 });
 
 test('a seat floor applies when the plan grants no seats at all', t => {
-  const quota = { blobLimit: 1, storageQuota: 2, historyPeriod: 3 };
   const result = applyWovenSelfhostQuota(
-    quota,
+    seatlessQuota(),
     { ...inherit, selfhostSeatLimit: 1000 },
     true
   );
@@ -475,6 +510,49 @@ Expected: all pass, including the untouched `state.spec.ts`.
 git add packages/backend/server/src/core/quota/woven-config.ts packages/backend/server/src/core/quota/__tests__/woven-config.spec.ts
 git commit -m "feat(woven): add configurable self-host quota floors (affine-vap)"
 ```
+
+### ✅ Task 1 as-built — four deltas from the code above
+
+**DONE** in commits `0bca0bb5bb`, `60bd32833b`, `cc495d9055`, `e3ecfa7e8e`. Final state: 13 tests
+in `woven-config.spec.ts`, 24 across the quota glob, `tsc -b` and `oxlint` clean, scope exactly
+the two intended files. The committed code — not the listing above — is the source of truth. Four
+things changed during review, each because the plan's version was wrong:
+
+1. **`applyWovenSelfhostQuota` now returns `quota` unchanged when all three floors are `-1`, and
+   spreads `seatLimit` conditionally.** The plan's version claimed inherit was "provably
+   indistinguishable from upstream" and was not: `{ ...quota, seatLimit: undefined }` creates an
+   own enumerable property, so an absent `seatLimit` came back present-with-`undefined` — a shape
+   upstream never produces. The `allInherit` early return fixes the default path by returning the
+   same reference; the conditional spread (`...(seatLimit === undefined ? {} : { seatLimit })`)
+   makes the guarantee unconditional rather than tied to that fast path. Reachability, for
+   perspective: every `plan_catalog` arm sets `member_limit: Some(...)`, so `seat_limit: None`
+   appears unreachable today — this is defence against an upstream change, not a live bug.
+
+2. **The shapes are exported as `WOVEN_LIMIT_SHAPES` and the tests assert against them.** The
+   plan's zod test re-declared the shape locally, and the plan's own rationale — "it fails if
+   someone loosens `limitShape`" — was flatly false: deleting `.refine` left the suite green.
+   Worse, the per-key bound assignment was unpinned, so exchanging `limitShape(INT32_MAX)` and
+   `limitShape(Number.MAX_SAFE_INTEGER)` between the seat and storage keys passed everything while
+   admitting a 9-quadrillion seat floor into an int4 column. Now pinned, including the blob bound
+   and both boundary values.
+
+3. **`Math.trunc(configured)` in both floor helpers.** `getDefaultConfig()` validates defaults and
+   env, but `CONFIG_JSON_PATHS` overrides (`~/.affine/config/config.json` — the primary self-host
+   mechanism) and `ConfigFactory.override` are **not** validated. A fractional storage value would
+   reach `BigInt(...)` in `state.ts` and throw `RangeError` on every quota reconcile. `trunc` is on
+   `configured` only; applying it to `resolved` would silently alter an upstream-supplied value.
+   The header comment now names `max()` + `trunc()` as the real guarantee instead of implying
+   schema validation covers every entry point.
+
+4. **`floorOptional`/`floorRequired` renamed to `floorMaybeAbsent`/`floorPresent`**, the storage
+   `desc` now says it applies to the user projection too (D7), and all three `desc`s warn that the
+   value is a plain integer — `parseEnvValue` uses `parseInt`, so `1_000` becomes a floor of `1`
+   that validates fine and is then inert against any real plan value. The silent-failure mechanism
+   itself is bead `affine-fgo` (log resolved floors at startup); deliberately not fixed here.
+
+Deliberately **not** done: splitting the pure helper into its own module so the unit test does not
+execute `defineModuleConfig` as an import side effect. Defensible, but it deviates from this
+plan's file structure for a concern AVA's per-file process isolation already contains.
 
 ---
 
