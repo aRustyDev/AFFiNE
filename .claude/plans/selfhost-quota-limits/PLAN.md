@@ -137,10 +137,27 @@ the Rust side and whose `null` currently means _no seats_. Numeric fields are re
 `number` to keep the native-derived `Quota` type intact; comparisons are exact for byte counts
 below 2^53 (~9 PB), which is not a practical constraint.
 
-### The patch (one upstream-owned file)
+### The patch (one hand-edited upstream-owned file, plus two generated ones)
 
-`packages/backend/server/src/core/quota/state.ts`, four small regions, each marked
-`// FORK(woven): configurable self-host quotas (bead affine-vap)`:
+**Correction, found during Task 2 review — the original claim of "one upstream-owned file" was
+wrong.** Registering a config module pulls `defineModuleConfig('woven', …)` into `app.module`'s
+graph, so `yarn affine server genconfig` emits the three descriptors into two **committed,
+upstream-owned** artifacts:
+
+- `.docker/selfhost/schema.json`
+- `packages/frontend/admin/src/config.json`
+
+Both exist at the upstream baseline, and `.github/workflows/build-test.yml:481-493` ("Run Check")
+runs genconfig and fails on any diff — so leaving them stale is a hard PR blocker, not a tidiness
+issue. They are **ADDITIVE** (generated, no behavior of their own) and need manifest rows of their
+own. Regenerate, never hand-edit. Consequence to accept deliberately: the three floors become
+editable fields in the admin settings panel, validated on write via `core/config/service.ts:69`.
+
+So the manifest gains **three** rows, not one: `state.ts` as FORK-LOCAL CORE PATCH, and these two
+as ADDITIVE.
+
+The hand-edited patch is `packages/backend/server/src/core/quota/state.ts`, four small regions,
+each marked `// FORK(woven): configurable self-host quotas (bead affine-vap)`:
 
 1. side-effect + helper import of `./woven-config`
 2. `Config` added to the constructor — `QuotaStateService` does not currently inject it
@@ -204,6 +221,16 @@ the main risk of the Mode B route, since no CI can detect it (no file diverges).
 - **`userMemberLimit(plan)`** — a second hardcoded `10` at `service.ts:220`, mirrored in the
   frontend at `modules/cloud/entities/user-quota.ts:60`. Informational only: it feeds the _user_
   quota display ("Pro users can invite up to 10"), not enforcement. Left alone.
+
+  **Sharpened during Task 2 review, and it qualifies a claim made above.** This is a genuine
+  counterexample to "the frontend reads the same persisted projection": `UserQuotaType.memberLimit`
+  is derived from the plan by _two_ independent mechanisms — server-side `userMemberLimit(plan)`
+  and a duplicate client-side computation — so **no seat floor can ever reach it**. An operator
+  running a 1000-seat floor will still see `10` on the user/plan panel while the members panel
+  correctly shows the raised limit. Blast radius is cosmetic (the members UI reads
+  `workspaceQuota.memberLimit`, which is floored correctly), but it is a visible inconsistency, so
+  expect the question rather than being surprised by it.
+
 - **The rolling invite ceiling** — deployment config per D8, not code.
 - **Mode B / team mode** — its own bead. The knobs raise the numbers but do **not** unlock Admin
   roles, doc-permission-filtered search, or 90-day analytics; see
