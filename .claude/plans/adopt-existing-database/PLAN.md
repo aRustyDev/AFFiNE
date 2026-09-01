@@ -1,0 +1,261 @@
+# PLAN — adopt-existing-database (compatibility check, ADOPT mode, dry-run, deployment identity)
+
+> **FORK-LOCAL. Additive; the guard core is fork-owned (`src/core/db-compat/`), with three
+> ADDITIVE rows added to `scripts/woven-patch-manifest.md` for the upstream-owned files it
+> wires into. Per `affine-cm9` (fork strategy) and `affine-hn1` (upstream-leak guard).**
+> Status: **DESIGN APPROVED 2026-08-31 — implementation not started.**
+> Bead: `affine-tc6` (P1, open, owner adam). Subtasks `.1`–`.6` = T1–T6 below, to be filed.
+> Cross-refs: infra beads `infra-zptb.6` (restore drill), `infra-zptb.8` (decommission).
+> Decisions: [findings/decision-log.md](findings/decision-log.md) · Grounding:
+> [findings/grounding.md](findings/grounding.md) · Open questions:
+> [findings/open-questions.md](findings/open-questions.md)
+
+## One-paragraph summary
+
+Today a server instance assumes it either owns a virgin database or one it migrated itself.
+`server.initialized()` is literally `models.user.count() > 0`, so a restored or relocated
+database is adopted **implicitly**, with no compatibility check — and because deployment is
+forward-only, starting an older binary against a database migrated by a newer one fails at
+request time rather than at boot. This plan adds a **startup compatibility check** that
+classifies the database as EQUAL / DB_BEHIND / DB_AHEAD / DIVERGED and **fails closed on
+DB_AHEAD**, an **explicit ADOPT decision** recorded in the database rather than inferred from
+user count, a **dry-run report** (`yarn cli db status`) that lists pending migrations tiered
+by whether they make rollback impossible, and a **deployment-identity stamp** so pointing a
+server at the _wrong_ populated database is detected instead of half-migrated.
+
+## Documents
+
+| Doc                                                      | What                                                                                                                                      |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| [findings/grounding.md](findings/grounding.md)           | Verified facts, all measured on this tree: deployment topology, migration-corpus scan, `app_configs` namespace hazard, Nest boot ordering |
+| [findings/decision-log.md](findings/decision-log.md)     | D1–D10                                                                                                                                    |
+| [findings/open-questions.md](findings/open-questions.md) | OQ-1 (emergency bypass) … OQ-4 (data migrations)                                                                                          |
+
+## Why the enforcement point is what it is
+
+The consuming deployment (`infrastructure/products/affine/kube/charts/affine`) runs prisma
+migrations as an **initContainer in the server pod**, not a Helm hook Job — a deliberate
+choice, documented in the template: a pre-install hook deadlocks umbrella installs because it
+needs postgres, a regular resource of the same release. Its command is
+`node ./scripts/self-host-predeploy.js`, and the upstream self-host compose path runs the
+identical command.
+
+Three consequences shape this design:
+
+1. **The gate lands in this repo.** The chart already invokes the script that carries it, so
+   there is **no infra-repo change** for the gate itself. (Setting `AFFINE_DEPLOYMENT_ID`
+   later is a values-only change via the chart's existing `extraEnv` — no template edit.)
+2. **It runs on every pod start**, restarts and scale-ups included — unlike a Helm hook.
+3. **Refusal is a safe failure.** The new pod wedges in `Init`, the rolling update stalls, and
+   the old fleet keeps serving.
+
+## Architecture
+
+New **fork-owned** directory `packages/backend/server/src/core/db-compat/`. Nothing
+upstream-owned lives inside it, so it is rebase-safe by construction and carries no manifest
+row. All judgement sits in the two pure modules.
+
+| File               | Purpose                                                                              | Depends on      |
+| ------------------ | ------------------------------------------------------------------------------------ | --------------- |
+| `classify.ts`      | `classifyDdl(sql) → { tier, hits[] }`. Pattern table only.                           | nothing (pure)  |
+| `migration-set.ts` | Resolve the migrations dir; list names, read `migration.sql`.                        | `node:fs`       |
+| `db-state.ts`      | `_prisma_migrations` via `$queryRaw`: applied / rolled-back / failed / table-absent. | Prisma          |
+| `compat.ts`        | Combine set + state + identity into a `CompatReport` + verdict.                      | pure over above |
+| `identity.ts`      | Read/write the deployment stamp in `app_configs`.                                    | Prisma          |
+| `service.ts`       | Nest injectable: `report()`, `check()`.                                              | above           |
+| `guard.ts`         | `OnApplicationBootstrap` → refuse to listen.                                         | service         |
+| `index.ts`         | `DbCompatModule` + public types.                                                     | —               |
+
+## Verdicts
+
+`DB_AHEAD` detection needs **no identity**: an applied migration name this binary does not
+carry is conclusive on its own. That is the guard the bead is really about, and it works from
+the first deploy that contains it.
+
+`applied` = rows in `_prisma_migrations` with `rolled_back_at IS NULL`. A row with
+`finished_at IS NULL AND rolled_back_at IS NULL` is a failed or interrupted migration and gets
+its own verdict rather than being counted either way.
+
+| Verdict             | Meaning                                   | Predeploy                              | Boot                    |
+| ------------------- | ----------------------------------------- | -------------------------------------- | ----------------------- |
+| `VIRGIN`            | no `_prisma_migrations`, no users         | proceed                                | proceed                 |
+| `EQUAL`             | applied == known                          | proceed                                | proceed                 |
+| `DB_BEHIND`         | known ⊃ applied                           | migrate (subject to the adoption gate) | proceed                 |
+| `DB_AHEAD`          | applied ⊃ known                           | **refuse**                             | **refuse**              |
+| `DIVERGED`          | both ahead and behind                     | **refuse**                             | **refuse**              |
+| `IDENTITY_MISMATCH` | stamp ≠ configured `AFFINE_DEPLOYMENT_ID` | **refuse**                             | **refuse**              |
+| `MIGRATION_FAILED`  | a row unfinished and not rolled back      | **refuse**                             | **refuse**              |
+| `UNREADABLE`        | migrations dir not found                  | **refuse**                             | log ERROR, **continue** |
+
+`UNREADABLE` is asymmetric on purpose. A predeploy wedge is safe; refusing to _boot_ over a
+packaging fault could wedge the fleet for a non-safety reason. Since the initContainer shares
+the pod and the image, predeploy has already refused in that case — the boot path never sees
+it in the deployment that matters. See D9.
+
+**Mapping to the bead's wording.** The bead specifies four classes, EQUAL / DB_BEHIND /
+DB_AHEAD / UNRELATED. The first three keep their names. **`UNRELATED` splits into two verdicts**
+because it has two distinguishable causes and they deserve different messages: a _branched
+migration history_ (`DIVERGED` — applied and known each contain names the other lacks) and a
+_different deployment's database_ (`IDENTITY_MISMATCH` — the stamp names another deployment).
+Both refuse. `VIRGIN`, `MIGRATION_FAILED`, and `UNREADABLE` are additions: the bead's four
+classes tacitly assume a readable, non-empty, non-broken migration history, and each of those
+three needs an answer that is neither "adopt" nor a crash.
+
+## DDL classification (tiers)
+
+Measured on the real corpus: 117 prisma migrations, 25 trip the prior-art destructive pattern
+set, and spot-checking found **no false positives** — they are genuine. But one tier is not
+enough, because two of the 25 hit _only_ on `DROP CONSTRAINT`, which an older binary reads and
+writes past without noticing. Reporting those as "rollback impossible" would be an alarm that
+cries wolf, and a gate operators learn to pass with the override flag is not a gate.
+
+| Tier          | Meaning                                                 | Patterns (indicative)                                                                                           | Gates?        |
+| ------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------- |
+| `BLOCKING`    | an older binary cannot read or write                    | `DROP TABLE`, `DROP COLUMN`, `RENAME TO`, `RENAME COLUMN`, `ALTER COLUMN … TYPE`, `ALTER COLUMN … SET NOT NULL` | yes           |
+| `DESTRUCTIVE` | data or a constraint is lost; the old binary still runs | `DROP CONSTRAINT`, `DROP INDEX`, `TRUNCATE`, `DELETE FROM`                                                      | no (reported) |
+| `EXPAND`      | additive                                                | everything else                                                                                                 | no            |
+
+`BLOCKING` is the tier that answers "will rollback be possible". `db status` reports the answer
+as an explicit line, not as something the operator has to infer from a hit list.
+
+## Adoption gate and the identity ratchet
+
+**The gate.** Populated database, no stamp — which is _every_ existing deployment the moment
+this ships:
+
+- `EQUAL`, or `DB_BEHIND` where every pending migration is `EXPAND`/`DESTRUCTIVE`
+  → **auto-adopt**: write the stamp, log `ADOPTING pre-existing database (implicit)`.
+- `DB_BEHIND` with any `BLOCKING` pending migration
+  → **refuse** unless `AFFINE_DB_ADOPT=1` or `--adopt`.
+
+The live cluster is `EQUAL`, so shipping the guard does not wedge it, and the explicit gate
+sits exactly where the irreversibility is (D3).
+
+**Stated tension with the bead's wording.** The bead asks that adoption be "a decision recorded
+in logs rather than an accident of user count". Auto-adoption is still automatic, so a strict
+reading is only half-satisfied. What changes regardless of tier is the _basis_: adoption becomes
+a recorded, durable stamp naming the version, build, timestamp and mode — never an inference
+from `user.count() > 0` — and the auto path is reached only after the compatibility check has
+already passed. The always-require-the-flag variant was considered and rejected in D3 on
+rollout-safety grounds, not overlooked. If an operator wants the strict form, `AFFINE_DB_ADOPT`
+is the existing knob and the gate can be tightened to demand it unconditionally without
+redesign.
+
+**The ratchet.** A deployment identity must be asserted from **outside** the database or the
+check is circular — an id read _out_ of a database cannot tell you it is the wrong database. So
+identity comes from `AFFINE_DEPLOYMENT_ID`, a fork-owned config item. When it is unset at adopt
+time we mint a UUID, store it, and log:
+
+```
+deployment identity minted as <uuid>; set AFFINE_DEPLOYMENT_ID=<uuid> to enable wrong-database detection
+```
+
+Identity checking stays skipped-with-a-warning until it is set. Zero day-one breakage, and it
+ratchets: once an operator pins the value in `extraEnv`, `IDENTITY_MISMATCH` is live.
+
+**Stamp storage.** `app_configs`, id **`$deployment`**. `app_configs` is _not_ a free-form
+store — `loadDbOverrides()` reads every row and merges it into the runtime config tree, with a
+single hardcoded denylist entry as the only escape. But `override()` **ignores unknown config
+modules outright**, so an id whose first dotted segment can never match a registered module
+name is silently inert: it reaches neither the config tree nor the admin resolver, and needs no
+patch to the denylist. The `$` prefix guarantees that. See G3 and D6.
+
+Payload:
+
+```jsonc
+{
+  "deploymentId": "<uuid|operator-supplied>",
+  "adoptedAt": "<iso8601>",
+  "adoptionMode": "fresh-install | implicit | explicit",
+  "adoptedBy": { "version": "...", "buildSha": "..." },
+  "lastMigratedBy": { "version": "...", "buildSha": "...", "at": "<iso8601>" },
+}
+```
+
+## Wiring
+
+- **`cli.ts`** gains a `db` command group:
+
+  - `db status` — the dry-run report: verdict, applied/known counts, pending list with tier and
+    the matched DDL lines, identity state, and an explicit rollback-possible verdict. `--json`
+    for CI. Always exits 0; it is informational.
+  - `db check` — the gate. Exits non-zero with a precise reason. Honors `--adopt`.
+
+  Both run on a **minimal Nest context — `ConfigModule` + `PrismaModule` only** — via a new
+  `withMinimalApp` helper beside the existing `withCliApp`, so the gate cannot fail for Redis
+  or Manticore reasons (D7). Verified viable: `PrismaFactory` depends only on `Config`.
+
+- **`scripts/self-host-predeploy.js`**: `runCompatGate()` between `fixFailedMigrations()` and
+  `runPrismaMigrations()`, shelling out to `yarn cli db check` in the same `execSync` idiom the
+  script already uses. Non-zero exit wedges the initContainer.
+
+- **`app.module.ts`**: `DbCompatModule` in **`AppModule` only — never `FunctionalityModules`**.
+  The CLI imports `FunctionalityModules`, so a guard there would make `db check` unable to run
+  in precisely the situation it exists for (D10).
+
+Verified in the installed `@nestjs/core`: `listen()` calls `init()`, which runs
+`callBootstrapHook()` before `httpAdapter.listen()`. A throw in `onApplicationBootstrap`
+propagates out of `init()`, so the port is never bound — refusal is a real refusal, not a
+window during which the server serves traffic.
+
+## Testing
+
+Regression fixtures are **drawn from the measured corpus, not invented**:
+
+- `classify.spec.ts` — the pattern table, plus two corpus anchors:
+  `20260714000001_drop_legacy_permission_and_subscription` must be `BLOCKING`, and
+  `20260803095500_converge_copilot_runtime` must be `DESTRUCTIVE` and **not** `BLOCKING`. The
+  second is the false-alarm regression the tiering exists to prevent.
+- `compat.spec.ts` — the full verdict table over synthetic known/applied sets, including the
+  rolled-back and unfinished-row edge cases.
+- `db-compat.spec.ts` — ava against real Postgres, matching the existing server suite:
+  `VIRGIN`/`EQUAL`/`DB_AHEAD`, stamp write-then-read, implicit vs explicit adoption, and
+  `IDENTITY_MISMATCH`.
+
+## Fork bookkeeping
+
+Three **ADDITIVE** rows in `scripts/woven-patch-manifest.md` (the guard fails on an
+unmanifested upstream-owned change, so this is not optional):
+
+| File                                                     | Why the row                           |
+| -------------------------------------------------------- | ------------------------------------- |
+| `packages/backend/server/src/cli.ts`                     | `db` command group + `withMinimalApp` |
+| `packages/backend/server/src/app.module.ts`              | one import: `DbCompatModule`          |
+| `packages/backend/server/scripts/self-host-predeploy.js` | `runCompatGate()` call                |
+
+Run `scripts/woven-manifest-guard.sh` until clean before pushing.
+
+**Merge-checklist rewire.** `woven-patch-manifest.md` step 2 currently says "audit incoming
+migrations for destructive DDL" by hand, and notes that this is "a prompt to a human, not the
+guard". It becomes `yarn cli db status` — this plan converts that prompt into the tool.
+
+## Phases (bead subtasks `affine-tc6.1`–`.6`)
+
+- **T1 — Classifier + migration set (pure core).** `classify.ts`, `migration-set.ts`, and
+  `classify.spec.ts` including both corpus anchors. No DB, no Nest. Deliverable: the tiering is
+  demonstrably right on all 117 real migrations before anything depends on it.
+- **T2 — DB state + verdict engine.** `db-state.ts` (raw `_prisma_migrations`, missing-table and
+  failed-row handling), `compat.ts`, `compat.spec.ts`. Deliverable: every row of the verdict
+  table is reachable and tested.
+- **T3 — Identity stamp + adoption gate.** `identity.ts`, `AFFINE_DEPLOYMENT_ID` config item,
+  `service.ts`, adoption decision logic, `db-compat.spec.ts` against real Postgres.
+- **T4 — CLI.** `withMinimalApp`, `db status`, `db check --adopt`, `--json`. First manifest row.
+  Deliverable: the bead's third acceptance clause (operator can list pending migrations and see
+  which are contracting) is met and demonstrable.
+- **T5 — Enforcement.** `guard.ts`, `app.module.ts` import, `self-host-predeploy.js` gate.
+  Remaining two manifest rows. Deliverable: acceptance clauses one and two.
+- **T6 — Docs, rewire, verification.** Rewrite `woven-patch-manifest.md` step 2; document
+  `AFFINE_DEPLOYMENT_ID` and `AFFINE_DB_ADOPT`; **verify against a database recovered per the
+  infra restore-drill runbook**
+  (`infrastructure/docs/src/operations/affine-pg-restore-drill.md`), which is the bead's stated
+  verification condition and the only phase needing an environment outside this repo.
+
+## Not covered, stated plainly
+
+An image built **before** this lands cannot refuse anything. The already-spent rollback across
+`20260714000001_drop_legacy_permission_and_subscription` — a CONTRACT migration present at
+`woven/main` HEAD and inside the pinned image — stays unprotected, and a
+**verified-restorable** backup remains the only net for it. This plan stops the _next_ one.
+
+Data migrations (`_data_migrations`) are not classified in T1–T5; unlike prisma migrations they
+carry a `down()`. See OQ-4.
