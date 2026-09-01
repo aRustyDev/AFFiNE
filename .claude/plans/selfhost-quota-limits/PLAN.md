@@ -45,12 +45,20 @@ are mandatory and part of this plan, not optional follow-ups:
    `scripts/woven-manifest-guard.sh` on every PR into `woven/main` (bead `affine-hn1.2`,
    closed). Run the guard locally before pushing; with no `--head` it also checks uncommitted
    work.
-2. A `// FORK(woven):` marker on every changed line, so rebases and the eventual outbound-leak
-   guard (`affine-hn1.4`, not yet built) can find them.
+2. A `// FORK(woven):` marker on every changed line, so rebases and the outbound-leak guard
+   (`affine-hn1.4`, shipped as `ca96cc38cd`) can find them.
 
-`gh pr create` in this repo defaults to the **parent** repo (`toeverything/AFFiNE`). Target the
-fork explicitly. The `affine-hn1.2` PR only failed to open against upstream by naming
-coincidence.
+**The manifest row's category string is load-bearing, not documentation.** `--outbound` reads
+column 2 and fails when the change set touches a file categorised **FORK-LOCAL CORE PATCH**.
+Getting that column wrong does not merely mislabel the row — it disarms the outbound guard for
+this patch. `.husky/pre-push` runs `--outbound --head HEAD` whenever the destination URL matches
+`UPSTREAM_REPO` (`scripts/woven-upstream-baseline:25`) or a pushed ref lands on
+`refs/heads/upstream/**`, and refers you to `scripts/woven-upstream-branch.sh <name> <path>...`
+to prepare a genuinely upstream-directed branch. It is a seatbelt: `git push --no-verify` walks
+past it, and the CI job on `upstream/**` is the backstop. Note also that `gh pr create` in this
+repo still defaults to the **parent** repo (`toeverything/AFFiNE`), and a cross-fork PR opened
+from a branch pushed to the fork is a flow no push-triggered check can see — target the fork
+explicitly.
 
 ## Operator decisions baked in
 
@@ -117,7 +125,10 @@ The module registers via `defineModuleConfig('woven', …)` following the establ
 and its unit tests are fork-owned and rebase-safe. Only the _call sites_ are upstream-owned.
 
 ```ts
-export function applyWovenSelfhostQuota(quota: Quota, woven: WovenConfig): Quota;
+export function applyWovenSelfhostQuota(
+  quota: Quota,
+  woven: WovenConfig
+): Quota;
 ```
 
 Semantics per field: `configured === -1` ⇒ return the resolved value unchanged; otherwise
@@ -139,13 +150,13 @@ below 2^53 (~9 PB), which is not a practical constraint.
 
 Everything downstream follows with no further edits:
 
-| Consumer                                                           | Reads                                | Effect of the floor                     |
-| ------------------------------------------------------------------ | ------------------------------------ | --------------------------------------- |
-| `state.ts:168` `overcapacityMemberCount`                           | `seatLimit`                          | 0 ⇒ no `member_overflow` ⇒ not readonly |
-| `service.ts:104` `getWorkspaceSeatQuota` ⇒ `tryCheckSeat` (`:111`) | persisted `seatLimit`                | all seat checks pass                    |
-| `member.ts:332`, `:536`, `:790`                                    | same                                 | `NoMoreSeat` never thrown               |
-| `state.ts:166` readonly comparison                                 | `storageQuota`                       | no `storage_overflow`                   |
-| `blob.ts:185-191` upload checks                                    | persisted `storageQuota`/`blobLimit` | uploads accepted                        |
+| Consumer                                                            | Reads                                | Effect of the floor                      |
+| ------------------------------------------------------------------- | ------------------------------------ | ---------------------------------------- |
+| `state.ts:168` `overcapacityMemberCount`                            | `seatLimit`                          | 0 ⇒ no `member_overflow` ⇒ not readonly  |
+| `service.ts:104` `getWorkspaceSeatQuota` ⇒ `tryCheckSeat` (`:111`)  | persisted `seatLimit`                | all seat checks pass                     |
+| `member.ts:332`, `:536`, `:790`                                     | same                                 | `NoMoreSeat` never thrown                |
+| `state.ts:166` readonly comparison                                  | `storageQuota`                       | no `storage_overflow`                    |
+| `blob.ts:185-191` upload checks                                     | persisted `storageQuota`/`blobLimit` | uploads accepted                         |
 | frontend `modules/quota/entities/quota.ts:72` via realtime snapshot | `state.seatLimit`                    | members header + client invite gate lift |
 
 The frontend needs **no patch**: it derives `memberLimit` verbatim from `state.seatLimit`.
@@ -159,23 +170,25 @@ The frontend needs **no patch**: it derives `memberLimit` verbatim from `state.s
 - **T3 — Integration spec.** `core/quota/__tests__/woven-selfhost-quota.spec.ts`, fork-owned,
   reusing the harness that `state.spec.ts:290` already uses for this exact plan
   (`globalThis.env.DEPLOYMENT_TYPE = 'selfhosted'` + `module.get(ConfigFactory).override(…)`).
-- **T4 — Fork hygiene.** Manifest row for `state.ts` (**FORK-LOCAL CORE PATCH**, delete-when:
-  upstream ships configurable self-host quotas); `scripts/woven-manifest-guard.sh` clean; PR
-  targeted at the fork explicitly.
+- **T4 — Fork hygiene.** Manifest row for `state.ts` with category exactly **FORK-LOCAL CORE
+  PATCH** (delete-when: upstream ships configurable self-host quotas) — the string `--outbound`
+  matches on. Verify **both** directions: `scripts/woven-manifest-guard.sh` (inbound) exits 0,
+  and `scripts/woven-manifest-guard.sh --outbound --head HEAD` exits **1**, proving the outbound
+  guard actually recognises this patch. PR targeted at the fork explicitly.
 - **T5 — Deployment.** Record `auth.inviteQuotaShadowMode = true` and the three knob values in
   the fork's deploy config, with D8's trade-off noted where operators will read it.
 
 ## Verification (maps to the bead's acceptance criteria)
 
-| Check                                                                                                                                                                                   | AC  |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
-| Seat floor set: inviting/accepting an 11th member succeeds, no `NoMoreSeat` / `MemberQuotaExceeded`                                                                                      | 1   |
-| With >10 members: `overcapacityMemberCount === 0`, `readonlyReasons` excludes `member_overflow`                                                                                          | 2   |
-| Defaults (`-1`): limits still enforced — **and** upstream's own `memberLimit === 10` assertions at `state.spec.ts:309,312` keep passing untouched, which is the real regression guard     | 3   |
-| Every changed line carries `// FORK(woven):`; manifest row exists; guard clean                                                                                                           | 4   |
-| Change absent from any upstream-directed branch                                                                                                                                          | 5   |
-| Storage floor: usage past the plan quota no longer sets `storage_overflow`; blob upload accepted                                                                                         | —   |
-| `DEPLOYMENT_TYPE=cloud`: all three knobs inert                                                                                                                                          | —   |
+| Check                                                                                                                                                                                                      | AC  |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
+| Seat floor set: inviting/accepting an 11th member succeeds, no `NoMoreSeat` / `MemberQuotaExceeded`                                                                                                        | 1   |
+| With >10 members: `overcapacityMemberCount === 0`, `readonlyReasons` excludes `member_overflow`                                                                                                            | 2   |
+| Defaults (`-1`): limits still enforced — **and** upstream's own `memberLimit === 10` assertions at `state.spec.ts:309,312` keep passing untouched, which is the real regression guard                      | 3   |
+| Every changed line carries `// FORK(woven):`; manifest row exists; guard clean                                                                                                                             | 4   |
+| Change absent from any upstream-directed branch — asserted positively: `woven-manifest-guard.sh --outbound --head HEAD` exits **1** on this branch, so the shipped guard demonstrably recognises the patch | 5   |
+| Storage floor: usage past the plan quota no longer sets `storage_overflow`; blob upload accepted                                                                                                           | —   |
+| `DEPLOYMENT_TYPE=cloud`: all three knobs inert                                                                                                                                                             | —   |
 
 ## Interaction with Mode B (why the knobs come first)
 
@@ -198,9 +211,8 @@ the main risk of the Mode B route, since no CI can detect it (no file diverges).
 
 ## Risks
 
-| Risk                                                                                                  | Mitigation                                                                                                                                                                                                       |
-| ----------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Upstream merge silently reverts the patch; no test fails because upstream asserts enforcement          | Manifest row + enforced guard (`affine-hn1.2`); `// FORK(woven):` markers; the T3 spec fails loudly if the floor stops applying                                                                                    |
-| The patch leaks into an upstream-directed PR                                                           | `affine-hn1.4` not yet built — until then, target PRs at the fork explicitly and never run bare `gh pr create`                                                                                                     |
-| A large seat floor inflates the native invite-abuse ceilings, which read `seat_limit` from the DB row  | For `selfhost_free`, `plan_ceiling_7d` returns a plan-based `10` regardless of seat limit (`workspace_invite_policy.rs:81`), so the floor does not widen the abuse window; D8 handles the ceiling deliberately instead |
-| `oxfmt` reformats these docs on the next hook-enabled commit                                           | Cosmetic; this worktree has no `node_modules`/`.husky/_`, so the hook could not run here                                                                                                                           |
+| Risk                                                                                                  | Mitigation                                                                                                                                                                                                             |
+| ----------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream merge silently reverts the patch; no test fails because upstream asserts enforcement         | Manifest row + enforced guard (`affine-hn1.2`); `// FORK(woven):` markers; the T3 spec fails loudly if the floor stops applying                                                                                        |
+| A large seat floor inflates the native invite-abuse ceilings, which read `seat_limit` from the DB row | For `selfhost_free`, `plan_ceiling_7d` returns a plan-based `10` regardless of seat limit (`workspace_invite_policy.rs:81`), so the floor does not widen the abuse window; D8 handles the ceiling deliberately instead |
+| `oxfmt` reformats these docs on the next hook-enabled commit                                          | Cosmetic; this worktree has no `node_modules`/`.husky/_`, so the hook could not run here                                                                                                                               |

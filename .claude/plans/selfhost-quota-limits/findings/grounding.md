@@ -36,14 +36,14 @@ a config knob would be a bypass of the license check.
 `EntitlementService.resolveBestEntitlement` returns it, and `QuotaStateService` persists it to
 `effective_workspace_quota_states`. **Every** enforcement point reads the persisted projection:
 
-| # | Enforcement point                                                              | Mechanism                                                       |
-| - | ------------------------------------------------------------------------------ | --------------------------------------------------------------- |
-| 1 | `quota/service.ts:111` `tryCheckSeat` ← `member.ts:790` `acceptInvitationByEmail` | `NoMoreSeat`                                                    |
-| 2 | `member.ts:332` `inviteMembers` batch                                          | `NoMoreSeat`                                                    |
-| 3 | `member.ts:536` `approveMember` (invite-link review)                           | `NoMoreSeat`                                                    |
-| 4 | `quota/state.ts:168` `overcapacityMemberCount`                                 | `member_overflow` ⇒ readonly ⇒ `permission/policy.ts:63`, and `assertWorkspaceAcceptsMemberChange` then blocks _all_ member changes |
-| 5 | `blob.ts:185-191`                                                              | `BlobQuotaExceeded` (per-file) / `StorageQuotaExceeded` (total)  |
-| 6 | frontend `desktop/dialogs/setting/workspace-setting/members/cloud-members-panel.tsx:209` | client-side block + upgrade modal, before the server is called |
+| #   | Enforcement point                                                                        | Mechanism                                                                                                                           |
+| --- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `quota/service.ts:111` `tryCheckSeat` ← `member.ts:790` `acceptInvitationByEmail`        | `NoMoreSeat`                                                                                                                        |
+| 2   | `member.ts:332` `inviteMembers` batch                                                    | `NoMoreSeat`                                                                                                                        |
+| 3   | `member.ts:536` `approveMember` (invite-link review)                                     | `NoMoreSeat`                                                                                                                        |
+| 4   | `quota/state.ts:168` `overcapacityMemberCount`                                           | `member_overflow` ⇒ readonly ⇒ `permission/policy.ts:63`, and `assertWorkspaceAcceptsMemberChange` then blocks _all_ member changes |
+| 5   | `blob.ts:185-191`                                                                        | `BlobQuotaExceeded` (per-file) / `StorageQuotaExceeded` (total)                                                                     |
+| 6   | frontend `desktop/dialogs/setting/workspace-setting/members/cloud-members-panel.tsx:209` | client-side block + upgrade modal, before the server is called                                                                      |
 
 1–3 all read `state.seatLimit` via `getWorkspaceSeatQuota` (`quota/service.ts:104`). 6 reads it
 verbatim from the realtime snapshot (`frontend/core/src/modules/quota/entities/quota.ts:72`),
@@ -60,19 +60,19 @@ enforcement.
 
 Two, selected by `hasStandaloneWorkspaceQuota(plan)` (`state.ts:370`).
 
-| | **Mode A — delegated to owner** | **Mode B — standalone** |
-| --- | --- | --- |
-| Plans | `free`, `pro`, `lifetime_pro`, `ai`, **`selfhost_free`** | `team`, `selfhost_team` |
-| Limit source | the **owner's user entitlement** (`state.ts:161` `quota = ownerEntitlement?.quota ?? resolved.quota`) | license/subscription `quantity` |
-| Seat enforcement | hard reject | seat _allocation_: `member.ts:329` guards `if (!isTeam)`, so team invites never throw; members enter `AllocatingSeat` and `allocateAvailableTeamSeats` promotes as many as fit |
-| Role management | **none** — `member.ts:589-591` throws `ActionForbiddenOnNonTeamWorkspace` for any change other than ownership transfer. `WorkspaceRole.Admin` (`models/common/role.ts:17`) is unassignable | full External / Collaborator / Admin / Owner |
-| Search honors per-doc permissions | **no** — `plugins/indexer/resolver.ts:158` `#readableDocIdsForSearch` returns `null` ⇒ `docIds: undefined` ⇒ search spans every doc in the workspace | restricted to readable doc ids |
-| Ownership-transfer fallback role | Collaborator | Admin (`models/workspace-user.ts:76`) |
-| Doc analytics window | 7 days (`NON_TEAM_ANALYTICS_WINDOW_DAYS`, `models/workspace-analytics.ts:18`) | up to 90 days (`:767`) |
-| Doc last-accessed members | last 7 days only (`:860`) | unrestricted |
-| Storage quota | borrows the owner's pool | standalone `quantity*20GB + 100GB` (`entitlement.rs:429`) |
-| Members panel header | `Members (n/limit)` | `Members (n)` — no denominator (`cloud-members-panel.tsx:283`) |
-| Account deletion | allowed | blocked while owning a team workspace (`models/user.ts:293`) |
+|                                   | **Mode A — delegated to owner**                                                                                                                                                            | **Mode B — standalone**                                                                                                                                                        |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Plans                             | `free`, `pro`, `lifetime_pro`, `ai`, **`selfhost_free`**                                                                                                                                   | `team`, `selfhost_team`                                                                                                                                                        |
+| Limit source                      | the **owner's user entitlement** (`state.ts:161` `quota = ownerEntitlement?.quota ?? resolved.quota`)                                                                                      | license/subscription `quantity`                                                                                                                                                |
+| Seat enforcement                  | hard reject                                                                                                                                                                                | seat _allocation_: `member.ts:329` guards `if (!isTeam)`, so team invites never throw; members enter `AllocatingSeat` and `allocateAvailableTeamSeats` promotes as many as fit |
+| Role management                   | **none** — `member.ts:589-591` throws `ActionForbiddenOnNonTeamWorkspace` for any change other than ownership transfer. `WorkspaceRole.Admin` (`models/common/role.ts:17`) is unassignable | full External / Collaborator / Admin / Owner                                                                                                                                   |
+| Search honors per-doc permissions | **no** — `plugins/indexer/resolver.ts:158` `#readableDocIdsForSearch` returns `null` ⇒ `docIds: undefined` ⇒ search spans every doc in the workspace                                       | restricted to readable doc ids                                                                                                                                                 |
+| Ownership-transfer fallback role  | Collaborator                                                                                                                                                                               | Admin (`models/workspace-user.ts:76`)                                                                                                                                          |
+| Doc analytics window              | 7 days (`NON_TEAM_ANALYTICS_WINDOW_DAYS`, `models/workspace-analytics.ts:18`)                                                                                                              | up to 90 days (`:767`)                                                                                                                                                         |
+| Doc last-accessed members         | last 7 days only (`:860`)                                                                                                                                                                  | unrestricted                                                                                                                                                                   |
+| Storage quota                     | borrows the owner's pool                                                                                                                                                                   | standalone `quantity*20GB + 100GB` (`entitlement.rs:429`)                                                                                                                      |
+| Members panel header              | `Members (n/limit)`                                                                                                                                                                        | `Members (n)` — no denominator (`cloud-members-panel.tsx:283`)                                                                                                                 |
+| Account deletion                  | allowed                                                                                                                                                                                    | blocked while owning a team workspace (`models/user.ts:293`)                                                                                                                   |
 
 Mode is derived from `state.plan` (`workspaces/service.ts:106`), which this plan does not
 touch — so `selfhost_free` stays in Mode A and its hard-reject branch simply never trips. No

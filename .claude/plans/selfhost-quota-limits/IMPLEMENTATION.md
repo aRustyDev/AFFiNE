@@ -1,0 +1,994 @@
+# Configurable self-host quota limits — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
+> (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
+> checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Make the three hardwired self-host quotas — workspace member cap (10), total storage
+quota (100GB), per-file blob limit (100MB) — runtime-configurable on self-hosted deployments,
+defaulting to byte-identical upstream behavior.
+
+**Architecture:** All three values originate in the Rust plan catalog's `selfhost_free` arm and
+reach every enforcement point through one projection written by `QuotaStateService`. A pure
+fork-owned helper floors them, applied at the two `reconcile*QuotaStateNow` sites in
+`state.ts`. That is the only upstream-owned file touched; the frontend, all four server-side
+seat checks, the readonly computation, and the blob upload checks all follow from the projection
+with no further edits.
+
+**Tech Stack:** TypeScript, NestJS, Prisma, AVA (`--concurrency 1 --serial`), zod for config
+validation, `defineModuleConfig` from `src/base`.
+
+**Design spec:** [PLAN.md](PLAN.md) · **Grounding:** [findings/grounding.md](findings/grounding.md)
+
+---
+
+## File Structure
+
+| File                                                                            | Ownership           | Responsibility                                                                                                                                                        |
+| ------------------------------------------------------------------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/backend/server/src/core/quota/woven-config.ts`                        | **new, fork-owned** | The `woven` config module registration and the pure `applyWovenSelfhostQuota` floor helper. All logic lives here so it is rebase-safe and unit-testable without a DB. |
+| `packages/backend/server/src/core/quota/__tests__/woven-config.spec.ts`         | **new, fork-owned** | Unit tests for the pure helper. No DB.                                                                                                                                |
+| `packages/backend/server/src/core/quota/__tests__/woven-selfhost-quota.spec.ts` | **new, fork-owned** | Integration tests through `QuotaStateService` against the disposable DB.                                                                                              |
+| `packages/backend/server/src/core/quota/state.ts`                               | **upstream-owned**  | Four small marked regions: import, constructor param, and the two reconcile call sites.                                                                               |
+| `scripts/woven-patch-manifest.md`                                               | fork-owned          | One row for `state.ts`, category **FORK-LOCAL CORE PATCH**.                                                                                                           |
+
+Nothing else changes. No migration, no schema change, no frontend change, no Rust change.
+
+---
+
+## Task 0: Bring up the test environment
+
+**Files:** none — environment only. No commit.
+
+- [ ] **Step 1: Activate the toolchain**
+
+```bash
+eval "$(micromamba shell hook -s bash)" && micromamba activate affine && node --version
+```
+
+Expected: `v22.22.3` (any `v22.x` satisfies the repo's `>=22.12 <23`).
+
+- [ ] **Step 2: Bring up the disposable stack**
+
+🚨 Server tests `TRUNCATE` the database. Only ever point `DATABASE_URL` at `localhost:5432`.
+
+```bash
+docker compose -f .docker/dev/compose.yml --env-file .docker/dev/.env up -d postgres redis mailpit
+```
+
+Expected: postgres on 5432, redis on 6379, mailpit on 1025/8025. If `.docker/dev/compose.yml`
+or `.env` is missing, copy from the adjacent `*.example` files — both are git-excluded.
+
+- [ ] **Step 3: Export the standard test environment**
+
+```bash
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+export DATABASE_URL="postgresql://affine:affine@localhost:5432/affine"
+export REDIS_SERVER_HOST=localhost
+export AFFINE_INDEXER_ENABLED=false
+```
+
+`NODE_ENV=test`, `DEPLOYMENT_TYPE=affine` and the `MAILER_*` vars are set by `ava.config.js`
+itself — do not set them here.
+
+- [ ] **Step 4: One-time DB setup (idempotent)**
+
+```bash
+corepack yarn workspace @affine/server prisma migrate deploy
+```
+
+Expected: migrations applied, or "No pending migrations to apply."
+
+- [ ] **Step 5: Confirm the untouched upstream spec passes before you change anything**
+
+```bash
+corepack yarn workspace @affine/server test src/core/quota/__tests__/state.spec.ts
+```
+
+Expected: all tests pass. This spec asserts `memberLimit === 10` for `selfhost_free` at lines
+309 and 312, and it must keep passing untouched through every task below — it is the
+default-behavior regression guard. If it fails here, stop and fix the environment first.
+
+---
+
+## Task 1: The config module and the pure floor helper
+
+**Files:**
+
+- Create: `packages/backend/server/src/core/quota/woven-config.ts`
+- Test: `packages/backend/server/src/core/quota/__tests__/woven-config.spec.ts`
+
+- [ ] **Step 1: Write the failing unit test**
+
+Create `packages/backend/server/src/core/quota/__tests__/woven-config.spec.ts`:
+
+```ts
+import test from 'ava';
+
+import { applyWovenSelfhostQuota, type WovenConfig } from '../woven-config';
+
+const ONE_MB = 1024 * 1024;
+const ONE_GB = 1024 * ONE_MB;
+
+const inherit: WovenConfig = {
+  selfhostSeatLimit: -1,
+  selfhostStorageQuota: -1,
+  selfhostBlobLimit: -1,
+};
+
+const planQuota = () => ({
+  blobLimit: 100 * ONE_MB,
+  storageQuota: 100 * ONE_GB,
+  seatLimit: 10,
+  historyPeriod: 30 * 24 * 60 * 60,
+});
+
+test('all -1 is an exact identity, including the object shape', t => {
+  const quota = planQuota();
+  const result = applyWovenSelfhostQuota(quota, inherit, true);
+
+  t.deepEqual(result, quota);
+});
+
+test('inheriting preserves an absent seatLimit as absent', t => {
+  const quota = { blobLimit: 1, storageQuota: 2, historyPeriod: 3 };
+  const result = applyWovenSelfhostQuota(quota, inherit, true);
+
+  t.false('seatLimit' in result && result.seatLimit !== undefined);
+});
+
+test('a floor above the plan value raises it', t => {
+  const result = applyWovenSelfhostQuota(
+    planQuota(),
+    { ...inherit, selfhostSeatLimit: 1000 },
+    true
+  );
+
+  t.is(result.seatLimit, 1000);
+});
+
+test('a floor below the plan value is a no-op — it never lowers a licensed plan', t => {
+  const result = applyWovenSelfhostQuota(
+    { ...planQuota(), seatLimit: 5000 },
+    { ...inherit, selfhostSeatLimit: 1000 },
+    true
+  );
+
+  t.is(result.seatLimit, 5000);
+});
+
+test('a seat floor applies when the plan grants no seats at all', t => {
+  const quota = { blobLimit: 1, storageQuota: 2, historyPeriod: 3 };
+  const result = applyWovenSelfhostQuota(
+    quota,
+    { ...inherit, selfhostSeatLimit: 1000 },
+    true
+  );
+
+  t.is(result.seatLimit, 1000);
+});
+
+test('storage and blob floors are independent of the seat floor', t => {
+  const result = applyWovenSelfhostQuota(
+    planQuota(),
+    {
+      selfhostSeatLimit: -1,
+      selfhostStorageQuota: 900 * ONE_GB,
+      selfhostBlobLimit: 500 * ONE_MB,
+    },
+    true
+  );
+
+  t.is(result.storageQuota, 900 * ONE_GB);
+  t.is(result.blobLimit, 500 * ONE_MB);
+  t.is(result.seatLimit, 10);
+});
+
+test('not self-hosted is an exact identity even with floors set', t => {
+  const quota = planQuota();
+  const result = applyWovenSelfhostQuota(
+    quota,
+    {
+      selfhostSeatLimit: 1000,
+      selfhostStorageQuota: 900 * ONE_GB,
+      selfhostBlobLimit: 500 * ONE_MB,
+    },
+    false
+  );
+
+  t.deepEqual(result, quota);
+});
+
+test('fields the helper does not own are passed through untouched', t => {
+  const result = applyWovenSelfhostQuota(
+    { ...planQuota(), copilotActionLimit: 10, seatQuota: 20 * ONE_GB },
+    { ...inherit, selfhostSeatLimit: 1000 },
+    true
+  );
+
+  t.is(result.copilotActionLimit, 10);
+  t.is(result.seatQuota, 20 * ONE_GB);
+  t.is(result.historyPeriod, 30 * 24 * 60 * 60);
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+```bash
+corepack yarn workspace @affine/server test src/core/quota/__tests__/woven-config.spec.ts
+```
+
+Expected: FAIL — cannot find module `../woven-config`.
+
+- [ ] **Step 3: Create the config module and helper**
+
+Create `packages/backend/server/src/core/quota/woven-config.ts`:
+
+```ts
+// WOVEN FORK-LOCAL — fork-owned file, rebase-safe by construction.
+//
+// Companion to the FORK-LOCAL CORE PATCH in ./state.ts (bead affine-vap). All the logic lives
+// here so that upstream owns only the two call sites; see
+// .claude/plans/selfhost-quota-limits/PLAN.md.
+//
+// Convention: -1 inherits the plan value (default, so an unconfigured server behaves exactly
+// like upstream), N >= 1 is a FLOOR applied via max(). 0 is rejected: upstream already uses 0
+// to mean "no seats" (state.ts, `quota.seatLimit ?? 0`), which drives overcapacityMemberCount
+// and would make the workspace readonly.
+import { z } from 'zod';
+
+import { defineModuleConfig } from '../../base';
+
+export interface WovenConfig {
+  selfhostSeatLimit: number;
+  selfhostStorageQuota: number;
+  selfhostBlobLimit: number;
+}
+
+declare global {
+  interface AppConfigSchema {
+    woven: WovenConfig;
+  }
+}
+
+const INHERIT = -1;
+// seat_limit is `Int @db.Integer` in schema.prisma and is read as i32 by the native
+// invite-abuse policy, so the seat floor cannot exceed int4.
+const INT32_MAX = 2147483647;
+
+function limitShape(max: number) {
+  return z
+    .number()
+    .int()
+    .min(INHERIT)
+    .max(max)
+    .refine(value => value !== 0, {
+      message: 'use -1 to inherit the plan value; 0 is not a valid limit',
+    });
+}
+
+defineModuleConfig('woven', {
+  selfhostSeatLimit: {
+    desc: 'Minimum workspace member limit on self-hosted deployments. -1 inherits the plan value (upstream behavior); N >= 1 raises the limit to at least N and never lowers a licensed plan. Ignored on cloud deployments.',
+    default: INHERIT,
+    shape: limitShape(INT32_MAX),
+    env: ['WOVEN_SELFHOST_SEAT_LIMIT', 'integer'],
+  },
+  selfhostStorageQuota: {
+    desc: 'Minimum total workspace storage quota in BYTES on self-hosted deployments. -1 inherits the plan value (upstream behavior). Ignored on cloud deployments.',
+    default: INHERIT,
+    shape: limitShape(Number.MAX_SAFE_INTEGER),
+    env: ['WOVEN_SELFHOST_STORAGE_QUOTA', 'integer'],
+  },
+  selfhostBlobLimit: {
+    desc: 'Minimum per-file blob size limit in BYTES on self-hosted deployments. -1 inherits the plan value (upstream behavior). Ignored on cloud deployments.',
+    default: INHERIT,
+    shape: limitShape(Number.MAX_SAFE_INTEGER),
+    env: ['WOVEN_SELFHOST_BLOB_LIMIT', 'integer'],
+  },
+});
+
+type Floorable = {
+  blobLimit: number;
+  storageQuota: number;
+  seatLimit?: number;
+};
+
+// Identity when configured === INHERIT — including preserving an absent seatLimit as absent,
+// so "unconfigured" is provably indistinguishable from upstream rather than merely equivalent.
+function floorOptional(resolved: number | undefined, configured: number) {
+  return configured === INHERIT
+    ? resolved
+    : Math.max(resolved ?? 0, configured);
+}
+
+function floorRequired(resolved: number, configured: number) {
+  return configured === INHERIT ? resolved : Math.max(resolved, configured);
+}
+
+export function applyWovenSelfhostQuota<T extends Floorable>(
+  quota: T,
+  floors: WovenConfig,
+  selfhosted: boolean = env.selfhosted
+): T {
+  if (!selfhosted) {
+    return quota;
+  }
+
+  return {
+    ...quota,
+    seatLimit: floorOptional(quota.seatLimit, floors.selfhostSeatLimit),
+    storageQuota: floorRequired(
+      quota.storageQuota,
+      floors.selfhostStorageQuota
+    ),
+    blobLimit: floorRequired(quota.blobLimit, floors.selfhostBlobLimit),
+  };
+}
+```
+
+`env` is a global (`globalThis.env`, declared in `src/env.ts`) — do not import it.
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+```bash
+corepack yarn workspace @affine/server test src/core/quota/__tests__/woven-config.spec.ts
+```
+
+Expected: 8 tests passed.
+
+- [ ] **Step 5: Verify the `0`-rejected rule holds at the config layer**
+
+The unit tests above cover the helper; this checks the zod shape actually rejects `0`. Append
+to `woven-config.spec.ts`:
+
+```ts
+test('the config shape rejects 0 and points at -1', t => {
+  const shape = z
+    .number()
+    .int()
+    .min(-1)
+    .max(2147483647)
+    .refine(value => value !== 0, {
+      message: 'use -1 to inherit the plan value; 0 is not a valid limit',
+    });
+
+  t.false(shape.safeParse(0).success);
+  t.true(shape.safeParse(-1).success);
+  t.true(shape.safeParse(1000).success);
+  t.false(shape.safeParse(-2).success);
+  t.false(shape.safeParse(1.5).success);
+});
+```
+
+Add `import { z } from 'zod';` to the test file's imports.
+
+This test deliberately restates the shape rather than importing it: the point is to pin the
+contract (`-1` yes, `0` no, `1000` yes, `-2` no, non-integer no), so it fails if someone
+loosens `limitShape` in `woven-config.ts`.
+
+- [ ] **Step 6: Run the whole quota suite to confirm nothing else moved**
+
+```bash
+corepack yarn workspace @affine/server test 'src/core/quota/__tests__/*.spec.ts'
+```
+
+Expected: all pass, including the untouched `state.spec.ts`.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add packages/backend/server/src/core/quota/woven-config.ts packages/backend/server/src/core/quota/__tests__/woven-config.spec.ts
+git commit -m "feat(woven): add configurable self-host quota floors (affine-vap)"
+```
+
+---
+
+## Task 2: Wire the seam — the seat floor end to end
+
+**Files:**
+
+- Create: `packages/backend/server/src/core/quota/__tests__/woven-selfhost-quota.spec.ts`
+- Modify: `packages/backend/server/src/core/quota/state.ts` (4 regions)
+
+- [ ] **Step 1: Write the failing integration test**
+
+Create `packages/backend/server/src/core/quota/__tests__/woven-selfhost-quota.spec.ts`:
+
+```ts
+import { randomUUID } from 'node:crypto';
+
+import { PrismaClient } from '@prisma/client';
+import ava, { ExecutionContext, TestFn } from 'ava';
+
+import {
+  createTestingModule,
+  type TestingModule,
+} from '../../../__tests__/utils';
+import { ConfigFactory } from '../../../base';
+import { Models, WorkspaceMemberStatus, WorkspaceRole } from '../../../models';
+import { EntitlementModule } from '../../entitlement';
+import { QuotaService } from '../service';
+import { QuotaServiceModule } from '../service.module';
+import { QuotaStateService } from '../state';
+
+interface Context {
+  module: TestingModule;
+  db: PrismaClient;
+  models: Models;
+  quota: QuotaService;
+  state: QuotaStateService;
+  config: ConfigFactory;
+}
+
+const test = ava.serial as TestFn<Context>;
+
+const INHERIT = -1;
+const ONE_MB = 1024 * 1024;
+const ONE_GB = 1024 * ONE_MB;
+
+test.before(async t => {
+  const module = await createTestingModule({
+    imports: [EntitlementModule, QuotaServiceModule],
+  });
+  t.context.module = module;
+  t.context.db = module.get(PrismaClient);
+  t.context.models = module.get(Models);
+  t.context.quota = module.get(QuotaService);
+  t.context.state = module.get(QuotaStateService);
+  t.context.config = module.get(ConfigFactory);
+});
+
+test.beforeEach(async t => {
+  await t.context.module.initTestingDB();
+  // ConfigFactory.override merges and is sticky across tests, so every test sets all three
+  // explicitly rather than relying on the registered defaults.
+  setFloors(t, { seat: INHERIT, storage: INHERIT, blob: INHERIT });
+});
+
+test.after.always(async t => {
+  await t.context.module.close();
+});
+
+function setFloors(
+  t: ExecutionContext<Context>,
+  floors: { seat: number; storage: number; blob: number }
+) {
+  t.context.config.override({
+    woven: {
+      selfhostSeatLimit: floors.seat,
+      selfhostStorageQuota: floors.storage,
+      selfhostBlobLimit: floors.blob,
+    },
+  });
+}
+
+async function asSelfhosted<T>(run: () => Promise<T>): Promise<T> {
+  const previous = globalThis.env.DEPLOYMENT_TYPE;
+  // @ts-expect-error test mutates the env singleton for deployment-specific quota semantics
+  globalThis.env.DEPLOYMENT_TYPE = 'selfhosted';
+  try {
+    return await run();
+  } finally {
+    // @ts-expect-error restore mutable test env singleton
+    globalThis.env.DEPLOYMENT_TYPE = previous;
+  }
+}
+
+async function createWorkspace(t: ExecutionContext<Context>) {
+  const owner = await t.context.models.user.create({
+    email: `${randomUUID()}@affine.pro`,
+  });
+  const workspace = await t.context.models.workspace.create(owner.id);
+
+  return { owner, workspace };
+}
+
+async function addAcceptedMembers(
+  t: ExecutionContext<Context>,
+  workspaceId: string,
+  count: number
+) {
+  for (let index = 0; index < count; index++) {
+    const member = await t.context.models.user.create({
+      email: `${randomUUID()}@affine.pro`,
+    });
+    await t.context.models.workspaceUser.set(
+      workspaceId,
+      member.id,
+      WorkspaceRole.Collaborator,
+      { status: WorkspaceMemberStatus.Accepted }
+    );
+  }
+}
+
+test('default (-1): an 11th member is over capacity and the workspace is readonly', async t => {
+  await asSelfhosted(async () => {
+    const { workspace } = await createWorkspace(t);
+    await addAcceptedMembers(t, workspace.id, 10);
+
+    const state = await t.context.state.reconcileWorkspaceQuotaState(
+      workspace.id
+    );
+
+    t.is(state.plan, 'selfhost_free');
+    t.is(state.seatLimit, 10);
+    t.is(state.memberCount, 11, 'owner + 10 collaborators');
+    t.is(state.overcapacityMemberCount, 1);
+    t.true(state.readonlyReasons.includes('member_overflow'));
+    t.false(await t.context.quota.tryCheckSeat(workspace.id));
+  });
+});
+
+test('seat floor 1000: 11 members are within capacity and the workspace is writable', async t => {
+  await asSelfhosted(async () => {
+    setFloors(t, { seat: 1000, storage: INHERIT, blob: INHERIT });
+    const { workspace } = await createWorkspace(t);
+    await addAcceptedMembers(t, workspace.id, 10);
+
+    const state = await t.context.state.reconcileWorkspaceQuotaState(
+      workspace.id
+    );
+
+    t.is(state.seatLimit, 1000);
+    t.is(state.memberCount, 11);
+    t.is(state.overcapacityMemberCount, 0);
+    t.false(state.readonlyReasons.includes('member_overflow'));
+    t.false(state.readonly);
+    t.true(await t.context.quota.tryCheckSeat(workspace.id));
+  });
+});
+
+test('seat floor never lowers: a floor of 1 leaves the plan value at 10', async t => {
+  await asSelfhosted(async () => {
+    setFloors(t, { seat: 1, storage: INHERIT, blob: INHERIT });
+    const { workspace } = await createWorkspace(t);
+
+    const state = await t.context.state.reconcileWorkspaceQuotaState(
+      workspace.id
+    );
+
+    t.is(state.seatLimit, 10);
+  });
+});
+```
+
+- [ ] **Step 2: Run the test to verify the floor tests fail**
+
+```bash
+corepack yarn workspace @affine/server test src/core/quota/__tests__/woven-selfhost-quota.spec.ts
+```
+
+Expected: the `default (-1)` test PASSES (that is current upstream behavior), and
+`seat floor 1000` FAILS with `t.is(state.seatLimit, 1000)` receiving `10`. That contrast is the
+point: the first test proves the harness is correct, the second proves the feature is missing.
+
+- [ ] **Step 3: Patch region 1 — the import**
+
+In `packages/backend/server/src/core/quota/state.ts`, after the existing
+`import { EntitlementService } from '../entitlement';` line, add:
+
+```ts
+// FORK(woven): configurable self-host quotas (bead affine-vap)
+import { applyWovenSelfhostQuota } from './woven-config';
+```
+
+Importing the module also runs its `defineModuleConfig` registration, which is what makes
+`config.woven` exist. `state.ts` is already pulled in eagerly by `quota/index.ts`, so this
+matches the timing of the `import './config'` idiom used elsewhere.
+
+- [ ] **Step 4: Patch region 2 — inject `Config`**
+
+Change the constructor from:
+
+```ts
+  constructor(
+    private readonly db: PrismaClient,
+    private readonly entitlement: EntitlementService,
+    private readonly event: EventBus
+  ) {}
+```
+
+to:
+
+```ts
+  constructor(
+    private readonly db: PrismaClient,
+    private readonly entitlement: EntitlementService,
+    private readonly event: EventBus,
+    // FORK(woven): configurable self-host quotas (bead affine-vap)
+    private readonly config: Config
+  ) {}
+```
+
+and add `Config` to the existing `import { EventBus, OnEvent } from '../../base';` so it reads:
+
+```ts
+import { Config, EventBus, OnEvent } from '../../base';
+```
+
+- [ ] **Step 5: Patch region 3 — the user reconcile site**
+
+In `reconcileUserQuotaStateNow`, immediately before `const update = {`, insert:
+
+```ts
+// FORK(woven): configurable self-host quotas (bead affine-vap)
+const quota = applyWovenSelfhostQuota(resolved.quota, this.config.woven);
+```
+
+and change `...this.quotaData(resolved.quota),` to:
+
+```ts
+      ...this.quotaData(quota),
+```
+
+- [ ] **Step 6: Patch region 4 — the workspace reconcile site**
+
+In `reconcileWorkspaceQuotaStateNow`, change:
+
+```ts
+const quota = ownerEntitlement?.quota ?? resolved.quota;
+```
+
+to:
+
+```ts
+// FORK(woven): configurable self-host quotas (bead affine-vap)
+const quota = applyWovenSelfhostQuota(
+  ownerEntitlement?.quota ?? resolved.quota,
+  this.config.woven
+);
+```
+
+Leave every line below it alone. `storageQuota` (the readonly comparison), `seatLimit`, and
+`workspaceQuotaData(quota)` all read this object, which is why one expression is enough.
+
+- [ ] **Step 7: Run the test to verify it passes**
+
+```bash
+corepack yarn workspace @affine/server test src/core/quota/__tests__/woven-selfhost-quota.spec.ts
+```
+
+Expected: 3 tests passed.
+
+- [ ] **Step 8: Run the untouched upstream spec — this is the real default-behavior guard**
+
+```bash
+corepack yarn workspace @affine/server test src/core/quota/__tests__/state.spec.ts
+```
+
+Expected: all pass, with no edits to that file. If `memberLimit === 10` at line 309 or 312
+fails, the defaults are not inheriting and the patch is wrong.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add packages/backend/server/src/core/quota/state.ts packages/backend/server/src/core/quota/__tests__/woven-selfhost-quota.spec.ts packages/backend/server/src/core/quota/woven-config.ts
+git commit -m "feat(woven): apply self-host quota floors in QuotaStateService (affine-vap)"
+```
+
+---
+
+## Task 3: Storage and blob floors
+
+**Files:**
+
+- Modify: `packages/backend/server/src/core/quota/__tests__/woven-selfhost-quota.spec.ts`
+
+No production code changes — Task 2's seam already covers these. These tests prove it.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `woven-selfhost-quota.spec.ts`:
+
+```ts
+async function addBlob(
+  t: ExecutionContext<Context>,
+  workspaceId: string,
+  size: number
+) {
+  await t.context.models.blob.upsert({
+    workspaceId,
+    key: randomUUID(),
+    mime: 'application/octet-stream',
+    size,
+  });
+}
+
+test('default (-1): storage past the plan quota makes the workspace readonly', async t => {
+  await asSelfhosted(async () => {
+    const { workspace } = await createWorkspace(t);
+    await addBlob(t, workspace.id, 101 * ONE_GB);
+
+    const state = await t.context.state.reconcileWorkspaceQuotaState(
+      workspace.id
+    );
+
+    t.is(state.storageQuota, BigInt(100 * ONE_GB));
+    t.true(state.readonlyReasons.includes('storage_overflow'));
+  });
+});
+
+test('storage floor 900GB: the same usage is within quota and not readonly', async t => {
+  await asSelfhosted(async () => {
+    setFloors(t, { seat: INHERIT, storage: 900 * ONE_GB, blob: INHERIT });
+    const { workspace } = await createWorkspace(t);
+    await addBlob(t, workspace.id, 101 * ONE_GB);
+
+    const state = await t.context.state.reconcileWorkspaceQuotaState(
+      workspace.id
+    );
+
+    t.is(state.storageQuota, BigInt(900 * ONE_GB));
+    t.false(state.readonlyReasons.includes('storage_overflow'));
+    t.false(state.readonly);
+  });
+});
+
+test('blob floor 500MB raises the per-file limit in the projection', async t => {
+  await asSelfhosted(async () => {
+    setFloors(t, { seat: INHERIT, storage: INHERIT, blob: 500 * ONE_MB });
+    const { workspace } = await createWorkspace(t);
+
+    const state = await t.context.state.reconcileWorkspaceQuotaState(
+      workspace.id
+    );
+
+    t.is(state.blobLimit, BigInt(500 * ONE_MB));
+  });
+});
+
+test('blob floor also reaches the calculator the upload path uses', async t => {
+  await asSelfhosted(async () => {
+    setFloors(t, { seat: INHERIT, storage: INHERIT, blob: 500 * ONE_MB });
+    const { workspace } = await createWorkspace(t);
+
+    const checkExceeded = await t.context.quota.getWorkspaceQuotaCalculator(
+      workspace.id
+    );
+
+    t.falsy(
+      checkExceeded(400 * ONE_MB)?.blobQuotaExceeded,
+      '400MB is under the raised per-file limit'
+    );
+    t.truthy(
+      checkExceeded(600 * ONE_MB)?.blobQuotaExceeded,
+      '600MB is still over it'
+    );
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify the floor tests fail before you look for a cause**
+
+```bash
+corepack yarn workspace @affine/server test src/core/quota/__tests__/woven-selfhost-quota.spec.ts
+```
+
+Expected: if Task 2 is complete these should **pass immediately** — the seam already covers
+storage and blob. If any fail, the seam was applied to only one of the two reconcile sites, or
+`workspaceQuotaData` is being handed `resolved.quota` instead of the floored `quota`. Re-check
+Task 2 steps 5 and 6 before changing anything else.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add packages/backend/server/src/core/quota/__tests__/woven-selfhost-quota.spec.ts
+git commit -m "test(woven): cover self-host storage and blob floors (affine-vap)"
+```
+
+---
+
+## Task 4: Cloud inertness and the user projection
+
+**Files:**
+
+- Modify: `packages/backend/server/src/core/quota/__tests__/woven-selfhost-quota.spec.ts`
+
+- [ ] **Step 1: Write the tests**
+
+Append to `woven-selfhost-quota.spec.ts`:
+
+```ts
+test('cloud deployment: floors are inert', async t => {
+  setFloors(t, { seat: 1000, storage: 900 * ONE_GB, blob: 500 * ONE_MB });
+  const { workspace } = await createWorkspace(t);
+  await addAcceptedMembers(t, workspace.id, 10);
+
+  // NOT wrapped in asSelfhosted — ava.config.js sets DEPLOYMENT_TYPE=affine, i.e. cloud.
+  const state = await t.context.state.reconcileWorkspaceQuotaState(
+    workspace.id
+  );
+
+  t.not(state.plan, 'selfhost_free');
+  t.not(state.seatLimit, 1000, 'the seat floor must not apply on cloud');
+  t.not(state.storageQuota, BigInt(900 * ONE_GB));
+  t.not(state.blobLimit, BigInt(500 * ONE_MB));
+});
+
+test('the user projection is floored too, so it cannot contradict the workspace', async t => {
+  await asSelfhosted(async () => {
+    setFloors(t, { seat: INHERIT, storage: 900 * ONE_GB, blob: INHERIT });
+    const { owner } = await createWorkspace(t);
+
+    const userState = await t.context.state.reconcileUserQuotaState(owner.id);
+
+    t.is(userState.plan, 'selfhost_free');
+    t.is(userState.storageQuota, BigInt(900 * ONE_GB));
+  });
+});
+```
+
+- [ ] **Step 2: Run the tests**
+
+```bash
+corepack yarn workspace @affine/server test src/core/quota/__tests__/woven-selfhost-quota.spec.ts
+```
+
+Expected: 9 tests passed. The user-projection test is what Task 2 step 5 exists for — if it
+fails, the user reconcile site was not patched.
+
+- [ ] **Step 3: Run the gate**
+
+```bash
+scripts/woven-ci-min.sh 'src/core/quota/__tests__/*.spec.ts'
+```
+
+Expected: typecheck, `oxlint --deny-warnings`, codegen-drift and the targeted AVA specs all
+pass. This is the canonical pre-push check — it also confirms no GraphQL/i18n codegen drift,
+which matters because a new config module is surfaced in the admin app config.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add packages/backend/server/src/core/quota/__tests__/woven-selfhost-quota.spec.ts
+git commit -m "test(woven): assert cloud inertness and user projection floors (affine-vap)"
+```
+
+---
+
+## Task 5: Fork hygiene — the manifest row and both guard directions
+
+**Files:**
+
+- Modify: `scripts/woven-patch-manifest.md`
+
+- [ ] **Step 1: Confirm the guard currently fails, and read exactly what it wants**
+
+```bash
+scripts/woven-manifest-guard.sh
+```
+
+Expected: FAIL, naming `packages/backend/server/src/core/quota/state.ts` as an upstream-owned
+file changed with no manifest row. The two new `woven-*` files and the new spec must **not** be
+named — they do not exist at the upstream baseline, so they are fork-owned and need no row. If
+the guard names them, stop: the baseline pin is wrong.
+
+- [ ] **Step 2: Add the row**
+
+Add to the `## Diverged upstream-owned files` table in `scripts/woven-patch-manifest.md`. The
+category column must read exactly **FORK-LOCAL CORE PATCH** — `--outbound` matches on that
+string, so a wrong value silently disarms the outbound guard for this patch:
+
+```markdown
+| `packages/backend/server/src/core/quota/state.ts` | **FORK-LOCAL CORE PATCH** | Makes the three hardwired `selfhost_free` quotas configurable — member cap (10), storage quota (100GB), per-file blob limit (100MB) — by flooring the resolved quota object at both `reconcile*QuotaStateNow` sites. All logic is in the fork-owned `core/quota/woven-config.ts`; only the two call sites, the `Config` injection and one import are upstream-owned. Defaults (`-1`) inherit the plan value, so an unconfigured server is byte-identical to upstream. Core quota/permission behavior ⇒ never upstream. Bead `affine-vap`; design `.claude/plans/selfhost-quota-limits/PLAN.md`. | upstream ships configurable self-host quotas (env or `AppConfig`) for member limit, storage quota and blob limit |
+```
+
+- [ ] **Step 3: Verify the inbound guard passes**
+
+```bash
+scripts/woven-manifest-guard.sh
+```
+
+Expected: exit 0, `✔ every upstream-owned divergence is manifested, and every row resolves.`
+
+- [ ] **Step 4: Verify the outbound guard actually recognises the patch**
+
+```bash
+scripts/woven-manifest-guard.sh --outbound --head HEAD; echo "exit: $?"
+```
+
+Expected: **exit 1** — it must refuse this branch. A `0` here means the category string is
+wrong and the leak guard would let this patch reach an upstream-directed branch. This is a
+positive assertion, not a formality.
+
+- [ ] **Step 5: Confirm every changed line in the upstream-owned file is marked**
+
+```bash
+git diff origin/woven/main -- packages/backend/server/src/core/quota/state.ts
+```
+
+Expected: every added line is either inside a `// FORK(woven):`-marked region or is one of the
+two changed lines those comments introduce. Four regions total, no more.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add scripts/woven-patch-manifest.md
+git commit -m "docs(woven): manifest the quota state.ts core patch (affine-vap)"
+```
+
+---
+
+## Task 6: Record the deployment configuration
+
+**Files:** the fork's deploy config (outside this repo) — plus a note in the plan.
+
+- [ ] **Step 1: Set the three knobs and the invite shadow mode in the deploy config**
+
+```
+WOVEN_SELFHOST_SEAT_LIMIT=1000
+WOVEN_SELFHOST_STORAGE_QUOTA=966367641600   # 900GB
+WOVEN_SELFHOST_BLOB_LIMIT=524288000         # 500MB
+```
+
+plus `auth.inviteQuotaShadowMode = true`, which is what actually lifts the ~10-invites-per-7-days
+rolling ceiling (see PLAN.md D8). Without it the seat floor alone will not let you onboard 40
+people by direct invite — though invite-link onboarding bypasses the ceiling regardless.
+
+Record alongside it that shadow mode disables **all** invite-quota enforcement — spam,
+high-risk domains, disposable-email cohorts — not just the seat-derived ceilings, and must be
+revisited if the instance ever accepts public signup.
+
+- [ ] **Step 2: Update the plan status**
+
+In `.claude/plans/selfhost-quota-limits/PLAN.md`, change the Status line from
+`DESIGN APPROVED — … Not yet implemented.` to `IMPLEMENTED — <date>, <commit sha>.`
+
+- [ ] **Step 3: Run the full gate one final time**
+
+```bash
+scripts/woven-ci-min.sh
+```
+
+Expected: pass. Note `affine-n9b` — `revenuecat.spec.ts` has a hardcoded `2026-09-01` expiry
+that now fails on wall-clock grounds, unrelated to this work and deferred by the operator. If
+that spec is the only failure, it is the known false alarm.
+
+- [ ] **Step 4: Commit and open the PR against the fork**
+
+```bash
+git add .claude/plans/selfhost-quota-limits/PLAN.md
+git commit -m "docs(woven): mark selfhost quota limits implemented (affine-vap)"
+gh pr create --repo aRustyDev/AFFiNE --base woven/main --fill
+```
+
+`--repo` is not optional: `gh pr create` defaults to the parent repo
+(`toeverything/AFFiNE`) in this checkout.
+
+- [ ] **Step 5: Close the bead**
+
+```bash
+bd close affine-vap --reason "DELIVERED. <PR link>, merged as <sha>. Three configurable self-host quota floors (seat/storage/blob) at the QuotaStateService seam; one upstream-owned file with a manifest row; outbound guard confirmed to refuse the branch (exit 1). auth.inviteQuotaShadowMode set in deploy config per D8. Unblocks affine-tfd."
+```
+
+Do **not** run `bd dolt push` — the shared Dolt server has no GitHub remote.
+
+---
+
+## Self-Review
+
+**Spec coverage** — every PLAN.md section maps to a task: the three knobs and their `-1`/`N`/`0`
+semantics (Task 1); the four `state.ts` regions D6/D7 specify (Task 2); the verification table's
+AC1/AC2 rows (Task 2), storage/blob row (Task 3), cloud-inertness row (Task 4), AC3 via the
+untouched upstream spec (Tasks 0, 2), AC4/AC5 including the positive `--outbound` assertion
+(Task 5); T5's deployment config and D8's shadow mode (Task 6). Out-of-scope items
+(`userMemberLimit`, the Rust ceiling, Mode B) get no tasks, correctly.
+
+**Placeholders** — none: every code step carries complete code, every command has an expected
+result, and the one intentional `<placeholder>` values are in the final bead-close message and
+PR link, which cannot be known in advance.
+
+**Type consistency** — `applyWovenSelfhostQuota(quota, floors, selfhosted?)` and `WovenConfig`
+with exactly `selfhostSeatLimit` / `selfhostStorageQuota` / `selfhostBlobLimit` are used
+identically in Tasks 1–4. `seatLimit` is `number | undefined` throughout, matching
+`ResolvedQuota` in `packages/backend/native/index.d.ts:1131`. Persisted `storageQuota` and
+`blobLimit` are compared as `BigInt` in the integration tests because `schema.prisma` declares
+them `BigInt @db.BigInt`, while `seatLimit` is compared as a plain number because it is
+`Int @db.Integer`.
+
+**Ordering caveat worth knowing before you start:** Task 3's tests are expected to pass the
+moment they are written, because Task 2's seam already covers storage and blob. That breaks the
+usual red-then-green rhythm, so Task 3 step 2 says explicitly what a failure there would mean
+(only one of the two reconcile sites patched) rather than leaving you to hunt. Do not "fix" the
+absence of a red phase by weakening the seam.
