@@ -26,6 +26,7 @@ interface Context {
 const test = ava.serial as TestFn<Context>;
 
 const INHERIT = -1;
+const ONE_GB = 1024 * 1024 * 1024;
 
 test.before(async t => {
   const module = await createTestingModule({
@@ -149,5 +150,24 @@ test('seat floor never lowers: a floor of 1 leaves the plan value at 10', async 
     );
 
     t.is(state.seatLimit, 10);
+  });
+});
+
+// Every workspace-site assertion above reads its quota via resolveUserEntitlement, not the user
+// row, so region 3 (the user reconcile site in state.ts) is never exercised by them — reverting
+// it to `resolved.quota` would leave all of the above green. This test pins that site to its own
+// observable: the persisted effectiveUserQuotaState row from reconcileUserQuotaState. The floor
+// (200GB) is chosen above selfhost_free's 100GB default so the assertion is unambiguous.
+test('a storage floor reaches the persisted user quota projection', async t => {
+  await asSelfhosted(async () => {
+    const { owner } = await createWorkspace(t);
+    setFloors(t, { seat: INHERIT, storage: 200 * ONE_GB, blob: INHERIT });
+
+    await t.context.state.reconcileUserQuotaState(owner.id);
+    const row = await t.context.db.effectiveUserQuotaState.findUnique({
+      where: { userId: owner.id },
+    });
+
+    t.is(row?.storageQuota, BigInt(200 * ONE_GB));
   });
 });

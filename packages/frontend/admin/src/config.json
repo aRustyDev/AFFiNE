@@ -252,6 +252,23 @@
       "desc": "How many bytes or characters a message can be, before closing the session (to avoid DoS)."
     }
   },
+  "woven": {
+    "selfhostSeatLimit": {
+      "type": "Number",
+      "desc": "Minimum workspace member limit on self-hosted deployments. -1 inherits the plan value (upstream behavior); N >= 1 raises the limit to at least N and never lowers a licensed plan. Ignored on cloud deployments. Plain integer, no units or separators (e.g. 1000, not \"1,000\"). Takes effect within 10 minutes, or immediately on the next membership/entitlement change.",
+      "env": "WOVEN_SELFHOST_SEAT_LIMIT"
+    },
+    "selfhostStorageQuota": {
+      "type": "Number",
+      "desc": "Minimum total storage quota in BYTES on self-hosted deployments; applies to both the workspace and user quota projections. -1 inherits the plan value (upstream behavior). Ignored on cloud deployments. Plain integer byte count, no units or separators (e.g. 107374182400, not \"100GB\"). Takes effect within 10 minutes, or immediately on the next membership/entitlement change.",
+      "env": "WOVEN_SELFHOST_STORAGE_QUOTA"
+    },
+    "selfhostBlobLimit": {
+      "type": "Number",
+      "desc": "Minimum per-file blob size limit in BYTES on self-hosted deployments. -1 inherits the plan value (upstream behavior). Ignored on cloud deployments. Plain integer byte count, no units or separators (e.g. 104857600, not \"100MB\"). Takes effect within 10 minutes, or immediately on the next membership/entitlement change.",
+      "env": "WOVEN_SELFHOST_BLOB_LIMIT"
+    }
+  },
   "server": {
     "name": {
       "type": "String",

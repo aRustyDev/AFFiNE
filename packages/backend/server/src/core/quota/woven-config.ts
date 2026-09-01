@@ -11,9 +11,11 @@
 //
 // getDefaultConfig() validates defaults and env, but CONFIG_JSON_PATHS overrides
 // (~/.affine/config/config.json, the primary self-host mechanism) and ConfigFactory.override
-// are NOT validated. A fractional value can therefore reach applyWovenSelfhostQuota; the real
-// guarantee this file provides is Math.max() applied to a Math.trunc()'d configured value, not
-// schema validation at every entry point.
+// are NOT validated. A fractional OR non-numeric value (e.g. "100GB", "1,000", null) can
+// therefore reach applyWovenSelfhostQuota; the real guarantee this file provides is that such a
+// value fails closed to the resolved plan value — via usableFloor() below — rather than
+// propagating NaN into Math.max()/BigInt(...) in state.ts, not schema validation at every entry
+// point.
 import { z } from 'zod';
 
 import { defineModuleConfig } from '../../base';
@@ -58,19 +60,19 @@ export const WOVEN_LIMIT_SHAPES = {
 
 defineModuleConfig('woven', {
   selfhostSeatLimit: {
-    desc: 'Minimum workspace member limit on self-hosted deployments. -1 inherits the plan value (upstream behavior); N >= 1 raises the limit to at least N and never lowers a licensed plan. Ignored on cloud deployments. Plain integer, no units or separators (e.g. 1000, not "1,000").',
+    desc: 'Minimum workspace member limit on self-hosted deployments. -1 inherits the plan value (upstream behavior); N >= 1 raises the limit to at least N and never lowers a licensed plan. Ignored on cloud deployments. Plain integer, no units or separators (e.g. 1000, not "1,000"). Takes effect within 10 minutes, or immediately on the next membership/entitlement change.',
     default: INHERIT,
     shape: WOVEN_LIMIT_SHAPES.selfhostSeatLimit,
     env: ['WOVEN_SELFHOST_SEAT_LIMIT', 'integer'],
   },
   selfhostStorageQuota: {
-    desc: 'Minimum total storage quota in BYTES on self-hosted deployments; applies to both the workspace and user quota projections. -1 inherits the plan value (upstream behavior). Ignored on cloud deployments. Plain integer byte count, no units or separators (e.g. 107374182400, not "100GB").',
+    desc: 'Minimum total storage quota in BYTES on self-hosted deployments; applies to both the workspace and user quota projections. -1 inherits the plan value (upstream behavior). Ignored on cloud deployments. Plain integer byte count, no units or separators (e.g. 107374182400, not "100GB"). Takes effect within 10 minutes, or immediately on the next membership/entitlement change.',
     default: INHERIT,
     shape: WOVEN_LIMIT_SHAPES.selfhostStorageQuota,
     env: ['WOVEN_SELFHOST_STORAGE_QUOTA', 'integer'],
   },
   selfhostBlobLimit: {
-    desc: 'Minimum per-file blob size limit in BYTES on self-hosted deployments. -1 inherits the plan value (upstream behavior). Ignored on cloud deployments. Plain integer byte count, no units or separators (e.g. 104857600, not "100MB").',
+    desc: 'Minimum per-file blob size limit in BYTES on self-hosted deployments. -1 inherits the plan value (upstream behavior). Ignored on cloud deployments. Plain integer byte count, no units or separators (e.g. 104857600, not "100MB"). Takes effect within 10 minutes, or immediately on the next membership/entitlement change.',
     default: INHERIT,
     shape: WOVEN_LIMIT_SHAPES.selfhostBlobLimit,
     env: ['WOVEN_SELFHOST_BLOB_LIMIT', 'integer'],
@@ -83,19 +85,26 @@ type Floorable = {
   seatLimit?: number;
 };
 
-// configured is truncated at this trust boundary: CONFIG_JSON_PATHS overrides and
-// ConfigFactory.override are not schema-validated, so a fractional override (e.g. a typo'd
-// byte count) must not reach BigInt(...) in state.ts and throw RangeError on every reconcile.
-function floorMaybeAbsent(resolved: number | undefined, configured: number) {
-  return configured === INHERIT
-    ? resolved
-    : Math.max(resolved ?? 0, Math.trunc(configured));
+// configured is coerced and range-checked at this trust boundary: CONFIG_JSON_PATHS overrides
+// and ConfigFactory.override are not schema-validated, so a fractional or non-numeric override
+// (a typo'd byte count, "100GB", "1,000", null, undefined, NaN, Infinity) must not reach
+// BigInt(...) in state.ts and throw RangeError on every reconcile, and must not reach a Prisma
+// int4 write and throw there either. Fail closed to the plan value: a floor we cannot make sense
+// of must never become NaN. INHERIT (-1) collapses to the same "leave resolved alone" outcome as
+// any other unusable value, since -1 < 1 — no separate INHERIT check is needed.
+function usableFloor(configured: unknown): number | null {
+  const floor = Math.trunc(Number(configured));
+  return Number.isFinite(floor) && floor >= 1 ? floor : null;
 }
 
-function floorPresent(resolved: number, configured: number) {
-  return configured === INHERIT
-    ? resolved
-    : Math.max(resolved, Math.trunc(configured));
+function floorMaybeAbsent(resolved: number | undefined, configured: unknown) {
+  const floor = usableFloor(configured);
+  return floor === null ? resolved : Math.max(resolved ?? 0, floor);
+}
+
+function floorPresent(resolved: number, configured: unknown) {
+  const floor = usableFloor(configured);
+  return floor === null ? resolved : Math.max(resolved, floor);
 }
 
 export function applyWovenSelfhostQuota<T extends Floorable>(

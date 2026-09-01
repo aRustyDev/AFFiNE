@@ -184,6 +184,73 @@ test('each key carries the bound its column can actually hold', t => {
   );
 });
 
+// CONFIG_JSON_PATHS overrides and ConfigFactory.override are not schema-validated, so any of
+// these can reach applyWovenSelfhostQuota at runtime even though WovenConfig's declared type is
+// `number`. Each must fail closed to the resolved plan value rather than producing NaN, which
+// would throw in BigInt(...) on every reconcile (state.ts) and take the quota subsystem down.
+// 0.5 is the fractional case: Math.trunc(0.5) === 0, which is below the floor of 1, so it is
+// rejected unconditionally rather than merely being small — Math.max() never gets a chance to
+// coincidentally leave the resolved value alone for the wrong reason.
+const GARBAGE_FLOORS: Array<[string, unknown]> = [
+  ['a formatted byte count', '100GB'],
+  ['a comma-grouped number', '1,000'],
+  ['NaN', NaN],
+  ['Infinity', Infinity],
+  ['null', null],
+  ['undefined', undefined],
+  ['a fractional value', 0.5],
+];
+
+test('a garbage seat floor fails closed to the plan value, never to NaN', t => {
+  for (const [label, garbage] of GARBAGE_FLOORS) {
+    const floors = {
+      ...inherit,
+      selfhostSeatLimit: garbage,
+    } as unknown as WovenConfig;
+    const result = applyWovenSelfhostQuota(planQuota(), floors, true);
+
+    t.is(result.seatLimit, 10, `${label} must not change the seat floor`);
+    t.true(Number.isFinite(result.seatLimit), `${label} must not produce NaN`);
+  }
+});
+
+test('a garbage storage floor fails closed to the plan value, never to NaN', t => {
+  for (const [label, garbage] of GARBAGE_FLOORS) {
+    const floors = {
+      ...inherit,
+      selfhostStorageQuota: garbage,
+    } as unknown as WovenConfig;
+    const result = applyWovenSelfhostQuota(planQuota(), floors, true);
+
+    t.is(
+      result.storageQuota,
+      100 * ONE_GB,
+      `${label} must not change the storage floor`
+    );
+    t.true(
+      Number.isFinite(result.storageQuota),
+      `${label} must not produce NaN`
+    );
+  }
+});
+
+test('a garbage blob floor fails closed to the plan value, never to NaN', t => {
+  for (const [label, garbage] of GARBAGE_FLOORS) {
+    const floors = {
+      ...inherit,
+      selfhostBlobLimit: garbage,
+    } as unknown as WovenConfig;
+    const result = applyWovenSelfhostQuota(planQuota(), floors, true);
+
+    t.is(
+      result.blobLimit,
+      100 * ONE_MB,
+      `${label} must not change the blob floor`
+    );
+    t.true(Number.isFinite(result.blobLimit), `${label} must not produce NaN`);
+  }
+});
+
 test('the selfhosted parameter defaults to env.selfhosted', t => {
   const previous = globalThis.env.DEPLOYMENT_TYPE;
   try {
