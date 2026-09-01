@@ -77,6 +77,30 @@ test('a seat floor applies when the plan grants no seats at all', t => {
   t.is(result.seatLimit, 1000);
 });
 
+test('a storage-only floor does not materialize an absent seatLimit', t => {
+  const quota = seatlessQuota();
+  const result = applyWovenSelfhostQuota(
+    quota,
+    { ...inherit, selfhostStorageQuota: 900 },
+    true
+  );
+
+  t.false('seatLimit' in result);
+  t.is(result.storageQuota, 900, 'the configured floor still applies');
+});
+
+test('a blob-only floor does not materialize an absent seatLimit', t => {
+  const quota = seatlessQuota();
+  const result = applyWovenSelfhostQuota(
+    quota,
+    { ...inherit, selfhostBlobLimit: 900 },
+    true
+  );
+
+  t.false('seatLimit' in result);
+  t.is(result.blobLimit, 900, 'the configured floor still applies');
+});
+
 test('storage and blob floors are independent of the seat floor', t => {
   const result = applyWovenSelfhostQuota(
     planQuota(),
@@ -149,6 +173,14 @@ test('each key carries the bound its column can actually hold', t => {
     WOVEN_LIMIT_SHAPES.selfhostStorageQuota.safeParse(
       Number.MAX_SAFE_INTEGER + 1
     ).success
+  );
+  t.true(
+    WOVEN_LIMIT_SHAPES.selfhostBlobLimit.safeParse(3221225472).success,
+    'a 3GB per-file blob floor must be accepted — blob is not int4-bounded'
+  );
+  t.false(
+    WOVEN_LIMIT_SHAPES.selfhostBlobLimit.safeParse(Number.MAX_SAFE_INTEGER + 1)
+      .success
   );
 });
 

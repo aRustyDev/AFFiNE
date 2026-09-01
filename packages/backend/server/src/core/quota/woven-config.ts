@@ -108,18 +108,23 @@ export function applyWovenSelfhostQuota<T extends Floorable>(
     floors.selfhostStorageQuota === INHERIT &&
     floors.selfhostBlobLimit === INHERIT;
 
-  // Return the same object, not a copy, so the default (unconfigured) path is identical to
-  // upstream by construction — including preserving an absent seatLimit as absent, which a
-  // field-by-field spread cannot do (`{ ...quota, seatLimit: undefined }` adds an own
-  // enumerable property that upstream never produces).
+  // Fast path only — NOT where the absent-seatLimit guarantee lives. Configuring even one
+  // floor (e.g. storage only) still routes seatLimit through the conditional spread below, so
+  // the guarantee that an absent seatLimit stays absent is unconditional, not tied to this
+  // early return.
   if (!selfhosted || allInherit) {
     return quota;
   }
 
+  const seatLimit = floorMaybeAbsent(quota.seatLimit, floors.selfhostSeatLimit);
+
   return {
     ...quota,
-    seatLimit: floorMaybeAbsent(quota.seatLimit, floors.selfhostSeatLimit),
     storageQuota: floorPresent(quota.storageQuota, floors.selfhostStorageQuota),
     blobLimit: floorPresent(quota.blobLimit, floors.selfhostBlobLimit),
+    // Conditionally spread rather than always assigning `seatLimit: seatLimit`, so an
+    // undefined result never materializes the key — `{ ...quota, seatLimit: undefined }`
+    // would add an own enumerable property that upstream never produces.
+    ...(seatLimit === undefined ? {} : { seatLimit }),
   };
 }
