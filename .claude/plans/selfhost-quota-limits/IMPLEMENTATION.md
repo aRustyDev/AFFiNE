@@ -860,14 +860,34 @@ adversarial review. Three things the plan did not anticipate had to be added:
    "Run Check". Their two **ADDITIVE** manifest rows were added in the same commit as the drift,
    which is where they belong; only the `state.ts` FORK-LOCAL CORE PATCH row is left for Task 5.
 
-2. **`Math.trunc` does not stop a string.** Task 1 hardened the fractional case; `'100GB'` from
-   the unvalidated `~/.affine/config/config.json` path becomes `NaN`, and `BigInt(NaN)` throws
-   `RangeError` on **every** reconcile — so `policy.getWorkspaceState` throws for any workspace
-   with a stale row and doc access is effectively down. A NaN seat floor is equally fatal via a
-   Prisma int4 write error. `woven-config.ts` now routes both floor helpers through a
-   `usableFloor()` that coerces with `Number(...)`, requires `Number.isFinite` and `>= 1`, and
-   **fails closed to the plan value**. `INHERIT` (`-1`) collapses into the same branch naturally,
+2. **`Math.trunc` does not stop a string — and the first fix for that was itself half-done.**
+   Task 1 hardened the fractional case; `'100GB'` from the unvalidated
+   `~/.affine/config/config.json` path becomes `NaN`, and `BigInt(NaN)` throws `RangeError` on
+   **every** reconcile — so `policy.getWorkspaceState` throws for any workspace with a stale row
+   and doc access is effectively down. A NaN seat floor is equally fatal via a Prisma int4 write
+   error.
+
+   The first attempt guarded with `Number.isFinite(...) && >= 1`, which failed closed on
+   non-finite input but **failed open on magnitude**: `{"selfhostSeatLimit": 5000000000}` was
+   accepted verbatim and Postgres then threw `value out of range for type integer` on every
+   reconcile — the same outage, reached differently — while `"9007199254740993"` was silently
+   persisted as `9007199254740992`. Note the asymmetry that made this worth fixing rather than
+   deferring: the **env** path was already protected (`parseEnvValue` → `desc.validate` →
+   `limitShape` → clean boot failure naming the key), so the only unprotected entry point was the
+   one the file's own comment calls "the primary self-host mechanism".
+
+   Final shape: `WOVEN_LIMIT_MAX` holds the per-key ceilings (`INT32_MAX` for seats,
+   `Number.MAX_SAFE_INTEGER` for storage and blob), `WOVEN_LIMIT_SHAPES` is **built from it**, and
+   `usableFloor(configured, max)` requires `Number.isSafeInteger(floor) && floor >= 1 && floor <= max`,
+   failing closed to the plan value otherwise. `isSafeInteger` subsumes `isFinite` and also rejects
+   the precision-lossy case. Boot-time validation and the runtime guard now provably cannot
+   disagree, and a test asserts they agree at each key's boundary by reading the shared constant
+   rather than a copied literal. `INHERIT` (`-1`) collapses into the unusable branch naturally,
    since `-1 < 1`.
+
+   Both clauses are independently pinned — verified by removing each alone and watching the
+   specific test that names it fail. That mattered: the round before, `>= 1` turned out to have no
+   test of its own and survived only incidentally via two object-shape assertions.
 
 3. **Region 3 was untested and would have stayed that way.** Every original integration test read
    _workspace_ state, and the workspace site takes its quota from a separate

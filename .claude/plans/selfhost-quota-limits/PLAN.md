@@ -3,7 +3,8 @@
 > **FORK-LOCAL CORE PATCH. MUST NEVER appear in an upstream-directed PR.** Per `affine-cm9`
 > (fork strategy) and `scripts/woven-agent-bootstrap.md` §0, which names the member/seat-limit
 > removal (`affine-vap`) as the fork's canonical never-upstream patch.
-> Status: **DESIGN APPROVED — grounded 2026-09-01 against HEAD `c6fc3b2dec`. Not yet implemented.**
+> Status: **IN PROGRESS — grounded 2026-09-01 against HEAD `c6fc3b2dec`. Tasks 0–2 done
+> (`IMPLEMENTATION.md` carries the as-built notes); Tasks 3–6 remain.**
 > Beads: `affine-vap` (this plan). Mode B — a self-minted self-host Team license — is split
 > out as its own bead depending on `affine-vap`; its research is preserved here in
 > [findings/mode-b-license-format.md](findings/mode-b-license-format.md).
@@ -20,7 +21,9 @@ three originate in `plan_catalog("selfhost_free", …)` in
 projection — `seatLimit` / `storageQuota` / `blobLimit` on `effective_workspace_quota_states`,
 written by `QuotaStateService`. A single fork-owned helper applied at the two
 `reconcile*QuotaStateNow` sites therefore covers all enforcement sites, the readonly
-computation, and the frontend, in **one upstream-owned file**. There is no existing
+computation, and the frontend, in **one hand-edited upstream-owned file** — plus two generated
+artifacts that registering a config module unavoidably rewrites (see _The patch_). There is no
+existing
 configuration surface for any of these — no env var, no `AppConfig` entry, nothing in docs —
 and the only upstream-supported way to raise them is a signature-verified self-host Team
 license.
@@ -41,7 +44,8 @@ reverts it, no test fails (upstream's tests assert the limits _are_ enforced), a
 regression surfaces in production as a member cap and a readonly workspace. Two mitigations
 are mandatory and part of this plan, not optional follow-ups:
 
-1. A `scripts/woven-patch-manifest.md` row for the one patched file, enforced by
+1. `scripts/woven-patch-manifest.md` rows — **three** of them: `state.ts` as FORK-LOCAL CORE
+   PATCH, and the two generated config artifacts as ADDITIVE. Enforced by
    `scripts/woven-manifest-guard.sh` on every PR into `woven/main` (bead `affine-hn1.2`,
    closed). Run the guard locally before pushing; with no `--head` it also checks uncommitted
    work.
