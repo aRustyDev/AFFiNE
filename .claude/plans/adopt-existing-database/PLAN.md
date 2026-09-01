@@ -63,9 +63,16 @@ connect. Verified: a bare `new PrismaClient()` fails without it.
 export DATABASE_URL="postgresql://affine:affine@localhost:5432/affine"
 ```
 
-**The development database may be shared with other work.** Do not assert absolute row counts —
-derive expected values in the test (e.g. compare `state.populated` against a live `user.count()`
-rather than a hard-coded number). A count that is stable today can change under you.
+**The development database may be shared with other work.** Do not assert absolute row counts
+against it — a count that is stable today can change under you.
+
+But do **not** "solve" that by deriving the expectation from the same call the code under test
+makes. `t.is(state.populated, (await db.user.count()) > 0)` restates the implementation and cannot
+fail; T2 shipped exactly that test and had to replace it. Instead **build a scratch schema with
+known contents** and assert against what you put there — bind it with `?schema=` on the connection
+URL (see T2's `db-state.spec.ts` for the pattern, including dropping the schema first so a run
+after an abnormal exit is idempotent). That gives a falsifiable assertion and is immune to what
+else is using the shared database.
 
 T1 needs **no** database — it is pure functions over files on disk.
 
@@ -130,6 +137,22 @@ the parser saw for each row.
 ---
 
 ## Task 1: Pure classifier and migration set
+
+> **LANDED 2026-09-01 — the code blocks below are the PRE-REVIEW design; the committed source is
+> the authority.** Review found five defects, two failing OPEN, and the fixes changed behaviour and
+> one signature. Divergences (`5f2d539598` → `d41704f430` → `9acc70ca26` → `48f5de1aa8`):
+>
+> - `scrubSql` also blanks **double-quoted identifiers** and handles `''` / E-string escapes; the
+>   dollar-tag pattern accepts digits. See G2d.
+> - `DdlClassification` carries **`unterminated: boolean`**, which forces `BLOCKING` with a
+>   synthetic `unparseable` hit (D4b).
+> - `rename-table` is anchored to `ALTER TABLE`; `truncate` to the start of a statement.
+> - `DdlHit.statement` is the **full** collapsed statement — `MAX_STATEMENT_DISPLAY` is gone, and
+>   truncation moved to `render.ts`.
+> - `MigrationSet.sql()` returns **`string | null`**; `resolveMigrationsDir` requires
+>   `migration_lock.toml` as a discriminator and tries bundle-relative candidates first.
+> - The corpus fixture is **17 / 14 / 86**, not 18 / 14 / 85 — a false positive was removed, not an
+>   assertion relaxed. See the correction note in G2a.
 
 **Files:**
 
@@ -679,6 +702,25 @@ git add packages/backend/server/src/core/db-compat/migration-set.ts packages/bac
 ---
 
 ## Task 2: Database state and the verdict engine
+
+> **LANDED 2026-09-01 — and the code blocks below are the PRE-REVIEW design. The committed source
+> is the authority.** Code review found three fail-opens and the fixes changed the interfaces, so
+> re-executing this section verbatim would reintroduce them. Divergences, all in
+> `fa3fc57ca1` → `df878c1adb` → `0e4882363a` → the wording follow-up:
+>
+> - `populated` is **`boolean | null`** in `DbState`, `CompatInput` and `CompatReport`; `null` means
+>   undetermined, never empty (D15).
+> - There is a **ninth verdict, `SCHEMA_INCOMPLETE`** (`populated === null && hasMigrationsTable`),
+>   in `REFUSING_VERDICTS`, sitting between `DB_AHEAD` and `VIRGIN`. `VIRGIN`'s condition became
+>   `!hasMigrationsTable && (populated === false || populated === null)`.
+> - `rollbackPossible` is **`null` for `EQUAL`** and the **computed value for `VIRGIN`** (D16).
+> - `migrations.sql()` is called inside a `try`/`catch`, because Task 1's implementation throws on
+>   EACCES rather than returning null.
+> - `isUndefinedTable` also matches a top-level `code === 'P2021'` (G6a) and no longer message-matches.
+> - `DbState` no longer carries `applied`/`failed` — `buildReport` derives them from `rows`, which is
+>   now `ORDER BY migration_name`.
+>
+> Tasks 3-6 below are written against the **post-fix** interfaces and are safe to execute as given.
 
 **Files:**
 
@@ -1598,6 +1640,9 @@ import test from 'ava';
 import { decide } from '../service';
 import type { CompatReport } from '../compat';
 
+// `rollbackPossible: null` for EQUAL is the real contract (D16): the engine
+// classifies only PENDING migrations, so it has no basis to claim rollback
+// safety when nothing is pending.
 const report = (over: Partial<CompatReport>): CompatReport => ({
   verdict: 'EQUAL',
   reason: 'ok',
@@ -1606,7 +1651,7 @@ const report = (over: Partial<CompatReport>): CompatReport => ({
   pending: [],
   ahead: [],
   failed: [],
-  rollbackPossible: true,
+  rollbackPossible: null,
   populated: true,
   identity: { kind: 'absent' },
   ...over,
@@ -1706,11 +1751,15 @@ test('a BLOCKING pending migration on an ALREADY-adopted database does not re-ga
   t.is(decision.adopt, null);
 });
 
+// Every member of REFUSING_VERDICTS, including the ninth verdict added in T2.
+// Keep this list in sync with `REFUSING_VERDICTS` in compat.ts — a verdict that
+// refuses there but is missing here is an untested refusal path.
 for (const verdict of [
   'DB_AHEAD',
   'DIVERGED',
   'IDENTITY_MISMATCH',
   'MIGRATION_FAILED',
+  'SCHEMA_INCOMPLETE',
 ] as const) {
   test(`${verdict} always refuses, flag or not`, t => {
     t.false(decide(report({ verdict }), { adopt: false }).ok);
@@ -1950,7 +1999,7 @@ Step 8 restores the render export; Task 5 Step 4 restores the guard.
 
 Run: `yarn affine @affine/server test src/core/db-compat/__tests__/service.spec.ts`
 
-Expected: PASS, 12 tests (the `for` loop contributes 4).
+Expected: PASS, 13 tests (the `for` loop contributes 5, one per refusing verdict).
 
 - [ ] **Step 10: Commit**
 
@@ -1978,6 +2027,9 @@ import test from 'ava';
 import type { CompatReport } from '../compat';
 import { renderReport } from '../render';
 
+// `rollbackPossible: null` on EQUAL is the real contract (D16) — the engine
+// classifies only pending migrations, so with nothing pending it has no basis
+// for a claim either way.
 const report = (over: Partial<CompatReport>): CompatReport => ({
   verdict: 'EQUAL',
   reason: 'the database matches this binary',
@@ -1986,7 +2038,7 @@ const report = (over: Partial<CompatReport>): CompatReport => ({
   pending: [],
   ahead: [],
   failed: [],
-  rollbackPossible: true,
+  rollbackPossible: null,
   populated: true,
   identity: { kind: 'absent' },
   ...over,
@@ -1995,7 +2047,25 @@ const report = (over: Partial<CompatReport>): CompatReport => ({
 test('renders the verdict and the rollback answer explicitly', t => {
   const text = renderReport(report({}));
   t.regex(text, /verdict:\s+EQUAL/);
-  t.regex(text, /rollback after applying:\s+POSSIBLE/);
+  t.regex(text, /rollback after applying:\s+UNKNOWN/);
+});
+
+test('VIRGIN reports N/A rather than a computed IMPOSSIBLE', t => {
+  // On a fresh install every migration is pending and some are BLOCKING, so the
+  // computed answer is always false — but there is no prior deployment to roll
+  // back to, and printing IMPOSSIBLE on the one unambiguously safe path is
+  // alarming and useless.
+  const text = renderReport(
+    report({
+      verdict: 'VIRGIN',
+      populated: false,
+      rollbackPossible: false,
+      pending: [{ name: 'm1', tier: 'BLOCKING', hits: [] }],
+    })
+  );
+  t.regex(text, /verdict:\s+VIRGIN/);
+  t.regex(text, /rollback after applying:\s+N\/A/);
+  t.notRegex(text, /IMPOSSIBLE/);
 });
 
 test('names each pending migration with its tier', t => {
@@ -2094,7 +2164,18 @@ function excerpt(statement: string): string {
   return `${statement.slice(0, EXCERPT_WIDTH)}… (+${dropped} chars)`;
 }
 
+/**
+ * `VIRGIN` deserves different wording. On a fresh install every migration is
+ * pending, and 17 of this repo's 117 are BLOCKING, so the computed answer is
+ * always `false` — the renderer would print "rollback IMPOSSIBLE" on the one
+ * path that is unambiguously safe. That is honest (an older image genuinely
+ * cannot read the resulting schema) but alarming and useless, since there is no
+ * prior deployment to roll back TO.
+ */
 function rollbackLine(report: CompatReport): string {
+  if (report.verdict === 'VIRGIN') {
+    return 'N/A (fresh install — nothing to roll back to)';
+  }
   if (report.rollbackPossible === null) {
     return 'UNKNOWN';
   }
@@ -2160,7 +2241,7 @@ export function renderReport(report: CompatReport): string {
 
 Run: `yarn affine @affine/server test src/core/db-compat/__tests__/render.spec.ts`
 
-Expected: PASS, 5 tests.
+Expected: PASS, 6 tests.
 
 - [ ] **Step 5: Restore the `renderReport` re-export in `index.ts`**
 
@@ -2288,7 +2369,9 @@ avoids a full rspack bundle build, which the `cli` script would require.
 Run: `yarn workspace @affine/server data-migration db status`
 
 Expected: a report whose verdict is `EQUAL` against a migrated development database, an
-`identity: not stamped` line on first run, and `rollback after applying: POSSIBLE`.
+`identity: not stamped` line on first run, and `rollback after applying: UNKNOWN` — **not**
+`POSSIBLE`. `EQUAL` reports `null` by design (D16): with nothing pending, the engine has no basis
+to claim rollback safety, and it never classifies already-applied migrations.
 
 Run: `yarn workspace @affine/server data-migration db check`
 

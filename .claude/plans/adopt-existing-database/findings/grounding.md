@@ -270,6 +270,14 @@ mistake, because the raw path is the one you think about first.
 Locally reproducible: bind a client to an empty schema with `?schema=` on the connection URL and
 call each API.
 
+**What would invalidate this.** The two shapes hold because this repo is Prisma 6.6 on
+`prisma-client-js` with `binaryTargets` and **no `driverAdapters` preview feature**, so raw
+failures go through the Rust query engine and carry `meta.code`. Adopting a driver adapter such as
+`@prisma/adapter-pg` would change the raw-error shape and invalidate the `meta.code` check. The
+scratch-schema tests in `db-state.spec.ts` would fail if either structured check stopped matching,
+so the breakage would be loud rather than silent — but the cause would not be obvious from the
+failure, which is why it is written down here.
+
 ### G6b — Local test runs need `DATABASE_URL` exported
 
 CI passes `DATABASE_URL: postgresql://affine:affine@localhost:5432/affine` as a job env var
