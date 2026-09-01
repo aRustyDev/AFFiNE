@@ -17,9 +17,17 @@
 #                    by construction, deliberately NOT tracked in the manifest.
 #
 # CHECKS
-#   1. UNMANIFESTED — an upstream-owned file diverges with no manifest row.
-#   2. STALE ROW    — a manifest row names a path absent from the tree (upstream
-#                     deleted it, or it was renamed and the row was not updated).
+#   1. UNMANIFESTED    — an upstream-owned file diverges with no manifest row.
+#   2. STALE ROW       — a manifest row names a path absent from the tree
+#                         (upstream deleted it, or it was renamed and the row
+#                         was not updated).
+#   3. UNPARSEABLE ROW — an in-section table row that is not the header, not
+#                         the separator, and not a well-formed
+#                         `path` | category row (e.g. a missing backtick).
+#                         Never silently dropped.
+#   4. BAD CATEGORY    — a row's category, once markdown emphasis is
+#                         stripped, is not exactly ADDITIVE or FORK-LOCAL CORE
+#                         PATCH. Never guessed as ADDITIVE.
 #   Every offending path is printed, so the fix is mechanical rather than a
 #   re-audit. Rows for files that no longer diverge are reported as a WARNING
 #   only — harmless staleness, not a reason to block a PR.
@@ -27,16 +35,41 @@
 # EXIT CODES (contract — see scripts/woven-manifest-guard.test.sh)
 #   0  clean
 #   1  policy violation
-#   2  usage or environment error (unresolvable baseline, missing manifest)
+#   2  usage or environment error — unresolvable baseline, missing manifest,
+#      an unparseable manifest row, an unrecognised category, or (under
+#      --outbound) a manifest table with no rows at all.
 #
 # Usage:
 #   scripts/woven-manifest-guard.sh [--base REF] [--head REF] [--manifest PATH]
+#   scripts/woven-manifest-guard.sh --outbound [--base REF] [--head REF] [--manifest PATH]
+#   scripts/woven-manifest-guard.sh --dump-rows [--manifest PATH]
+#
+# INBOUND (default): fail when an upstream-owned file diverges with no manifest
+# row — don't silently lose a fork patch to the next upstream merge.
+# OUTBOUND (--outbound): fail when the change set touches a file whose manifest
+# row says FORK-LOCAL CORE PATCH — don't leak a fork patch to upstream.
+# --dump-rows is a debugging aid, not a check: it prints every row the parser
+# and classifier saw — `path<TAB>category` for a row that parsed (the category
+# it was actually bucketed as, not just the raw manifest text — an inverted
+# ADDITIVE/FORK-LOCAL CORE PATCH classification would show up here), or
+# `!UNPARSED<TAB><raw line>` for one that didn't parse — then exits 0 without
+# running any of the four checks above. It answers "what did the parser and
+# classifier actually see?", which is exactly the question you want answered
+# when a row gets rejected, or when you want to confirm a path is paired with
+# the category you think it is before trusting that pairing.
 #
 # The baseline defaults to UPSTREAM_COMMIT in scripts/woven-upstream-baseline.
 # It must be RESOLVABLE: in CI use actions/checkout with fetch-depth: 0, since a
 # shallow clone will not contain the merge's upstream parent.
 #
 set -uo pipefail
+
+# sort -u below dedupes by COLLATION, not by byte value. Under a UTF-8 locale
+# two byte-distinct paths can compare collation-equal and silently collapse —
+# if the dropped line were the fork-local path, outbound would fail open. This
+# makes the sorted-order invariant `comm` relies on explicit rather than
+# incidental to whatever locale happens to be set.
+export LC_ALL=C
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 2
@@ -52,16 +85,20 @@ die()  { err "$*"; exit 2; }
 BASE=""
 HEAD_REF="HEAD"
 HEAD_EXPLICIT=0
+OUTBOUND=0
+DUMP_ROWS=0
 MANIFEST="$REPO_ROOT/scripts/woven-patch-manifest.md"
 BASELINE_FILE="$REPO_ROOT/scripts/woven-upstream-baseline"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --base)     [ $# -ge 2 ] || die "--base needs a ref";      BASE="$2";     shift 2 ;;
-    --head)     [ $# -ge 2 ] || die "--head needs a ref";      HEAD_REF="$2"; HEAD_EXPLICIT=1; shift 2 ;;
-    --manifest) [ $# -ge 2 ] || die "--manifest needs a path"; MANIFEST="$2"; shift 2 ;;
-    -h|--help)  sed -n '2,37p' "${BASH_SOURCE[0]}"; exit 0 ;;
-    *)          die "unknown argument: $1" ;;
+    --base)       [ $# -ge 2 ] || die "--base needs a ref";      BASE="$2";     shift 2 ;;
+    --head)       [ $# -ge 2 ] || die "--head needs a ref";      HEAD_REF="$2"; HEAD_EXPLICIT=1; shift 2 ;;
+    --manifest)   [ $# -ge 2 ] || die "--manifest needs a path"; MANIFEST="$2"; shift 2 ;;
+    --outbound)   OUTBOUND=1; shift ;;
+    --dump-rows)  DUMP_ROWS=1; shift ;;
+    -h|--help)    awk 'NR>1 && !/^#/{exit} NR>1' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *)            die "unknown argument: $1" ;;
   esac
 done
 
@@ -102,30 +139,140 @@ log "manifest ${MANIFEST#"$REPO_ROOT/"}"
 # Only the "## Diverged upstream-owned files" table counts. The category legend
 # above it and the measured-justification table below it are also pipe tables;
 # scoping to the section (and requiring a backticked path in COLUMN 1) keeps
-# rows like `cloudflare.com` from being mistaken for tracked files.
+# rows like `cloudflare.com` from being mistaken for tracked files. A pipe row
+# is the table's header until the separator (the `| --- | --- |` row) is seen —
+# tracked structurally so renaming the header text (e.g. "File" -> "Path") does
+# not turn a cosmetic edit into an UNPARSED failure. After the separator, an
+# in-section row that is not a well-formed `path` | category row is emitted on
+# a "!UNPARSED" marker line instead of being silently dropped — see the
+# UNPARSED check below, which turns that into exit 2.
 manifest_rows() {
   awk '
-    /^##[[:space:]]+Diverged upstream-owned files/ { insec = 1; next }
+    /^##[[:space:]]+Diverged upstream-owned files/ { insec = 1; sep_seen = 0; next }
     insec && /^#+[[:space:]]/                      { insec = 0 }
     insec && /^[[:space:]]*\|/ {
+      if ($0 ~ /^[[:space:]]*\|[-:|[:space:]]*$/) { sep_seen = 1; next }  # separator row
+      if (!sep_seen) next                                                # header row(s) above it
       n = split($0, f, "|")
-      if (n < 2) next
-      if (match(f[2], /`[^`]+`/)) print substr(f[2], RSTART + 1, RLENGTH - 2)
+      if (n >= 3 && match(f[2], /`[^`]+`/)) {
+        path = substr(f[2], RSTART + 1, RLENGTH - 2)
+        cat = f[3]
+        gsub(/[*_`]/, "", cat)              # drop markdown emphasis (**, __, `)
+        sub(/^[[:space:]]+/, "", cat)
+        sub(/[[:space:]]+$/, "", cat)
+        print path "\t" cat
+        next
+      }
+      print "!UNPARSED\t" $0
     }
   ' "$MANIFEST"
 }
 
-MANIFESTED="$(manifest_rows | sed 's#^\./##' | sed '/^$/d' | sort -u)"
-[ -n "$MANIFESTED" ] || warn "the manifest table lists no files — is the '## Diverged upstream-owned files' heading intact?"
+# Called once; --dump-rows, the UNPARSED check, MANIFESTED and the category
+# classification below all read from this same value so none of them can
+# drift against each other (manifest_rows previously ran twice, normalised
+# differently each time).
+ROWS="$(manifest_rows | sed 's#^\./##')"
+UNPARSED_RAW="$(printf '%s\n' "$ROWS" | grep '^!UNPARSED')"
+UNPARSED="$(printf '%s\n' "$UNPARSED_RAW" | cut -f2-)"
+
+# ---- classify the manifest rows by category --------------------------------
+# Column 2 is the FORK-LOCAL CORE PATCH / ADDITIVE distinction from affine-cm9.
+# An unrecognised value exits 2 in BOTH directions: it is a broken manifest, not
+# a policy violation, and guessing "probably additive" is how a leak ships.
+#
+# CLASSIFIED is built here and is exactly what --dump-rows prints — see below
+# for why FORKLOCAL is derived from it rather than built alongside it.
+BADCAT=""
+CLASSIFIED=""
+while IFS=$'\t' read -r p c; do
+  [ -n "$p" ] || continue
+  case "$c" in
+    "FORK-LOCAL CORE PATCH")
+      CLASSIFIED="${CLASSIFIED}${p}"$'\t'"FORK-LOCAL CORE PATCH"$'\n'
+      ;;
+    "ADDITIVE")
+      CLASSIFIED="${CLASSIFIED}${p}"$'\t'"ADDITIVE"$'\n'
+      ;;
+    *)
+      BADCAT="${BADCAT}${p}  [category: ${c:-<empty>}]"$'\n'
+      CLASSIFIED="${CLASSIFIED}${p}"$'\t'"!BADCAT(${c:-<empty>})"$'\n'
+      ;;
+  esac
+done <<< "$(printf '%s\n' "$ROWS" | grep -v '^!UNPARSED')"
+
+# FORKLOCAL is DERIVED from CLASSIFIED — the same value --dump-rows prints — so
+# the list this guard acts on is the list an operator can inspect. Building the
+# two in parallel would let them drift, and a fixture over the dump could not
+# see it. Exact field match, never a substring: a marker line must not be
+# mistaken for a classification.
+FORKLOCAL="$(printf '%s' "$CLASSIFIED" | awk -F'\t' '$2=="FORK-LOCAL CORE PATCH"{print $1}' | sort -u)"
+
+# ---- --dump-rows: debugging aid, not a check -------------------------------
+# Prints what the parser AND the classifier saw — `path<TAB>category` per row,
+# `!UNPARSED<TAB><raw line>` for one that didn't parse — then exits before any
+# of the four checks below can fail the guard. Use it to see exactly what
+# a rejected row looked like, or to confirm a path is paired with the category
+# you think it is before trusting that pairing.
+if [ "$DUMP_ROWS" -eq 1 ]; then
+  printf '%s\n' "$UNPARSED_RAW" | sed '/^$/d'
+  printf '%s' "$CLASSIFIED"
+  exit 0
+fi
+
+# ---- check: in-section rows that should have parsed and did not -----------
+# A row missing its backticked path, or otherwise malformed, used to vanish
+# silently (n < 3 -> skipped) — landing in neither MANIFESTED nor FORKLOCAL.
+# Inbound still caught the file as UNMANIFESTED, but outbound trusts absence
+# from FORKLOCAL as "safe to send upstream", so a silently dropped row would
+# fail OPEN there. Refuse to guess; name it and exit 2.
+if [ -n "$UNPARSED" ]; then
+  err "manifest row(s) in $MANIFEST that could not be parsed — refusing to guess:"
+  while IFS= read -r l; do [ -n "$l" ] && err "    $l"; done <<< "$UNPARSED"
+  err "  Each row needs: | \`path\` | **ADDITIVE** or **FORK-LOCAL CORE PATCH** | why | delete when |"
+  exit 2
+fi
+
+MANIFESTED="$(printf '%s\n' "$ROWS" | grep -v '^!UNPARSED' | cut -f1 | sed '/^$/d' | sort -u)"
+if [ -z "$MANIFESTED" ]; then
+  if [ "$OUTBOUND" -eq 1 ]; then
+    die "the manifest table in $MANIFEST lists no files — refusing to treat an empty manifest as \"nothing to leak\" under --outbound. Is the '## Diverged upstream-owned files' heading intact?"
+  fi
+  warn "the manifest table lists no files — is the '## Diverged upstream-owned files' heading intact?"
+fi
+
+if [ -n "$BADCAT" ]; then
+  err "manifest row(s) in $MANIFEST with an unrecognised category — refusing to guess:"
+  while IFS= read -r l; do [ -n "$l" ] && err "    $l"; done <<< "$BADCAT"
+  err ""
+  err "  Each row needs: | \`path\` | **ADDITIVE** or **FORK-LOCAL CORE PATCH** | why | delete when |"
+  err "  Column 2 must read ADDITIVE or FORK-LOCAL CORE PATCH once markdown emphasis (*, _, \`) is stripped."
+  exit 2
+fi
 
 # ---- classify the divergence ----------------------------------------------
 # In worktree mode diff the baseline against the working tree. Untracked files
 # are ignored on purpose: absent from the baseline, they are fork-owned by
 # definition and so can never be an unmanifested upstream-owned change.
+#
+# --no-renames: rename detection is ON by default and --name-only then reports
+# only the DESTINATION path. Renaming a FORK-LOCAL CORE PATCH file to a new
+# name with unchanged content would otherwise make the manifested (source)
+# path vanish from this list entirely, so neither the unmanifested check nor
+# the outbound leak check (LEAKED, below) would ever see it. With --no-renames
+# BOTH paths appear here, so LEAKED catches the source path directly — this
+# flag is load-bearing on its own, not a fallback for the STALE check below.
+# STALE is a second, independent net: it catches the same rename a different
+# way (the manifested path no longer resolves in the tree), which matters if
+# this flag were ever weakened or renames were reintroduced for nicer
+# reporting. -c core.quotePath=false: the default quotePath=true C-quotes
+# non-ASCII paths (e.g. `pkg/café.ts` -> `"pkg/caf\303\251.ts"`), and that
+# quoted form matches nothing in the manifest or in git cat-file lookups — a
+# silent drop from both UPSTREAM_OWNED and FORKLOCAL alike.
 if [ "$WORKTREE" -eq 1 ]; then
-  CHANGED="$(git diff --name-only "$BASE_SHA" | sed '/^$/d')"
+  CHANGED="$(git -c core.quotePath=false diff --no-renames --name-only "$BASE_SHA" | sed '/^$/d')"
 else
-  CHANGED="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sed '/^$/d')"
+  CHANGED="$(git -c core.quotePath=false diff --no-renames --name-only "$BASE_SHA" "$HEAD_SHA" | sed '/^$/d')"
 fi
 UPSTREAM_OWNED=""
 while IFS= read -r p; do
@@ -146,6 +293,11 @@ log "${n_changed} changed vs baseline · ${n_upstream} upstream-owned · ${n_row
 # ---- check 1: unmanifested upstream-owned divergence -----------------------
 UNMANIFESTED="$(comm -23 <(printf '%s\n' "$UPSTREAM_OWNED" | sed '/^$/d') \
                          <(printf '%s\n' "$MANIFESTED"     | sed '/^$/d'))"
+comm_rc=$?
+# Assertion: both inputs are sorted above (sort -u, under LC_ALL=C), so this
+# should be unreachable. Checked anyway rather than trusted, because a wrong
+# answer here is a silent policy determination, not a crash.
+[ "$comm_rc" -eq 0 ] || die "comm failed while computing UNMANIFESTED (exit $comm_rc) — an environment error, not a policy determination; refusing to report a possibly-wrong result."
 
 # ---- check 2: rows whose path is gone from the tree ------------------------
 STALE=""
@@ -166,12 +318,78 @@ while IFS= read -r p; do
   fi
 done <<< "$MANIFESTED"
 
+# ---- OUTBOUND mode: don't leak a fork patch to upstream --------------------
+# Asks an ADDITIONAL question to the inbound one, over the same inputs: not just
+# "is this divergence declared?" but "is this change set carrying something
+# marked NEVER-upstream?". Runs after BOTH inbound checks — UNMANIFESTED and
+# STALE — rather than just the first: outbound requires the branch to be
+# INBOUND-CLEAN, not merely unmanifested-clean. A stale row's category no
+# longer describes this tree either — for example a rename (CHANGED above is
+# taken with --no-renames precisely so a rename cannot hide the old path from
+# this diff) leaves the manifested path absent from the tree, and the row's
+# classification becomes unverifiable — the same "absence is ambiguous" shape
+# the unmanifested check exists to close on the other side.
+#
+# FORKLOCAL is derived from the manifest, so a row the parser cannot read
+# silently leaves the set, and an empty set looks exactly like "nothing to
+# leak". An unreadable or stale row makes gating here fail closed by
+# construction rather than by having been anticipated. It also means the
+# checks can never disagree: a branch cannot be "safe to send upstream" while
+# carrying a divergence the fork has not declared, or a row whose meaning this
+# tree can no longer confirm.
+if [ "$OUTBOUND" -eq 1 ]; then
+  if [ -n "$UNMANIFESTED" ] || [ -n "$STALE" ]; then
+    if [ -n "$UNMANIFESTED" ]; then
+      err "cannot judge this change set: upstream-owned file(s) with no manifest row:"
+      while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$UNMANIFESTED"
+      err ""
+      err "  An undeclared divergence has no category, so it cannot be cleared for"
+      err "  upstream. Add a row to ${MANIFEST#"$REPO_ROOT/"} — or revert the change."
+    fi
+    if [ -n "$STALE" ]; then
+      err "cannot judge this change set: manifest row(s) whose path no longer exists in the tree:"
+      while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$STALE"
+      err ""
+      err "  A stale row's category no longer describes this tree — the file may have"
+      err "  been renamed (a rename would otherwise hide the old path from this diff)"
+      err "  or deleted. Update or drop the row in ${MANIFEST#"$REPO_ROOT/"} before this"
+      err "  branch can be judged safe for upstream."
+    fi
+    exit 1
+  fi
+  # Compared against CHANGED, not UPSTREAM_OWNED: a FORK-LOCAL row on a file
+  # absent at the baseline (e.g. a fork-created file later reclassified, or the
+  # destination side of a rename) would otherwise escape this check, since
+  # UPSTREAM_OWNED excludes anything that doesn't exist at the baseline.
+  LEAKED="$(comm -12 <(printf '%s\n' "$CHANGED"   | sed '/^$/d' | sort -u) \
+                     <(printf '%s\n' "$FORKLOCAL" | sed '/^$/d' | sort -u))"
+  comm_rc=$?
+  # Assertion: both inputs are sorted above (sort -u, under LC_ALL=C), so this
+  # should be unreachable. Checked anyway rather than trusted, because a wrong
+  # answer here is a silent policy determination, not a crash.
+  [ "$comm_rc" -eq 0 ] || die "comm failed while computing LEAKED (exit $comm_rc) — an environment error, not a policy determination; refusing to report a possibly-wrong result."
+  if [ -n "$LEAKED" ]; then
+    err "FORK-LOCAL CORE PATCH on an upstream-directed change set:"
+    while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$LEAKED"
+    err ""
+    err "  These files change upstream behaviour and must NEVER reach upstream (affine-cm9)."
+    err "  This branch is not safe to send to the upstream repository."
+    err "  Start an upstream-bound branch from the upstream baseline instead:"
+    err "    scripts/woven-upstream-branch.sh <name> <path>..."
+    err "  There is no override. If a category is genuinely wrong, change the"
+    err "  manifest row in a reviewed commit."
+    exit 1
+  fi
+  ok "no FORK-LOCAL CORE PATCH in this change set — safe to send upstream."
+  exit 0
+fi
+
 # ---- report ----------------------------------------------------------------
 rc=0
 
 if [ -n "$UNMANIFESTED" ]; then
   rc=1
-  err "UNMANIFESTED upstream-owned divergence — add a row to scripts/woven-patch-manifest.md:"
+  err "UNMANIFESTED upstream-owned divergence — add a row to ${MANIFEST#"$REPO_ROOT/"}:"
   while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$UNMANIFESTED"
   err ""
   err "  Each row needs: | \`path\` | **ADDITIVE** or **FORK-LOCAL CORE PATCH** | why | delete when |"
@@ -183,7 +401,7 @@ fi
 
 if [ -n "$STALE" ]; then
   rc=1
-  err "STALE manifest row(s) — the path no longer exists in the tree; upstream probably deleted or renamed it:"
+  err "STALE manifest row(s) in ${MANIFEST#"$REPO_ROOT/"} — the path no longer exists in the tree; upstream probably deleted or renamed it:"
   while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$STALE"
   err "  Drop the row, or repoint it at the new path."
 fi
@@ -196,6 +414,6 @@ fi
 if [ "$rc" -eq 0 ]; then
   ok "every upstream-owned divergence is manifested, and every row resolves."
 else
-  err "manifest guard FAILED — see scripts/woven-patch-manifest.md (bead affine-hn1)."
+  err "manifest guard FAILED — see ${MANIFEST#"$REPO_ROOT/"} (bead affine-hn1)."
 fi
 exit "$rc"

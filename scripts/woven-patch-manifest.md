@@ -13,8 +13,9 @@ Only **upstream-owned** files belong in the table below. Fork-owned additions ar
 construction and are not tracked here — the CI guard's job is to fail when an upstream-owned file
 is modified _without_ a row here.
 
-That guard is **`scripts/woven-manifest-guard.sh`** (bead `affine-hn1.2`), run on every PR into
-`woven/main` by `.github/workflows/woven-manifest-guard.yml`. It decides ownership mechanically
+That guard is **`scripts/woven-manifest-guard.sh`** (bead `affine-hn1.2`), run by
+`.github/workflows/woven-manifest-guard.yml` — on every PR into `woven/main` (inbound), and on every
+push to an `upstream/**` branch (outbound, `--outbound`, bead `affine-hn1.4`). It decides ownership mechanically
 rather than by a path allowlist: a changed file is upstream-owned iff it also **exists at the
 upstream baseline** recorded in `scripts/woven-upstream-baseline`. It fails on an unmanifested
 upstream-owned change, and on a row whose path no longer exists in the tree. Run it locally before
@@ -23,6 +24,32 @@ pushing:
 ```bash
 scripts/woven-manifest-guard.sh
 ```
+
+The same script enforces the **outbound** direction with `--outbound` (bead
+`affine-hn1.4`): it fails when a change set touches a file whose row says
+**FORK-LOCAL CORE PATCH**, which `affine-cm9` requires never reach upstream. That
+makes column 2 load-bearing — a row's category is now enforced, not documentation.
+An unrecognised category exits 2 rather than being assumed ADDITIVE.
+
+Outbound only judges a branch that is already **inbound-clean**: it runs the same
+unmanifested-row and stale-row checks the default direction runs, and refuses to
+judge a branch that fails them. A manifest row the parser cannot read would
+otherwise silently drop its file out of the FORK-LOCAL set, so the leak check
+would pass by omission; requiring inbound-clean first means that class of parser
+gap fails closed instead. `--dump-rows` prints exactly what the parser and
+classifier saw for each row — path and resolved category, or the raw line if it
+did not parse — useful for debugging a rejected row or confirming a path is
+paired with the category you expect.
+
+To prepare a contribution for upstream, do not branch from `woven/main` — it
+carries every fork-local patch the fork has ever made. Use:
+
+```bash
+scripts/woven-upstream-branch.sh [--from REF] [--no-switch] <name> <path>...
+```
+
+It branches from `UPSTREAM_COMMIT`, carries over only the files you name, and
+names the branch `upstream/<name>` — the prefix the CI backstop keys on.
 
 This file is therefore no longer advisory prose. It was: `affine-hn1.1` shipped a version of it
 that omitted `packages/backend/server/src/seed/index.ts` even though that commit's own audit had
@@ -111,7 +138,10 @@ artifact. Re-run this before deleting the patch.
    `canary`/`beta`/`stable`/`v*.x` — **not** `woven/*` — so pushing a `woven/` branch runs nothing.
    The suite runs on `pull_request:`. Target `src/__tests__/oauth/controller.spec.ts` for auth
    changes; `woven-ci-min.sh`'s default glob (`src/core/quota/__tests__/*.spec.ts`) does not cover
-   OAuth. `woven-manifest-guard.yml` runs on this same `pull_request:` trigger, for the same
-   reason — a guard wired to `push:` would never fire on this fork.
+   OAuth. `woven-manifest-guard.yml` runs its inbound check on this same `pull_request:` trigger,
+   for the same reason. It **also** runs on `push:` to `upstream/**` (`affine-hn1.4`) — that
+   second trigger enforces the opposite direction (a fork-local patch must never reach upstream)
+   and is a fork-owned workflow free to declare its own `push:` branches, unlike `build-test.yml`,
+   whose trigger list is upstream's.
 8. Merging to `woven/main` triggers `woven-publish-image.yml` → GHCR. The consuming infra repo then
    re-pins the image **digest** (GHCR `woven-<sha>` tags are mutable).

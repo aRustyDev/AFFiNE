@@ -25,8 +25,12 @@ This is a **hybrid fork** (decision `affine-cm9`):
 
 If you are ever unsure whether a change is upstreamable, it is fork-local until a
 human says otherwise. Woven-specific files are namespaced (`woven-*`) or marked
-with a `WOVEN FORK-LOCAL` banner so the eventual upstream-leak CI guard
-(`affine-hn1`) can exclude them.
+with a `WOVEN FORK-LOCAL` banner for a human reading the diff — **not** for the
+outbound leak guard (`affine-hn1.4`, already built; see "Contributing back to
+upstream" below). That guard never excludes anything by namespace or banner: it
+decides ownership by presence at the upstream baseline and blocks by the
+manifest's category column (`scripts/woven-patch-manifest.md`), so a
+FORK-LOCAL CORE PATCH row is what keeps a patch out, not what it's named.
 
 ## 1. Toolchain
 
@@ -185,3 +189,64 @@ there is no "database is newer than me, refuse to start" guard and no
 down-migration path. Require a **verified-restorable** backup before deploying
 across one. Backup/restore is a cluster-side (CNPG) concern; see
 `docs/src/operations/affine-pg-restore-drill.md` in the infrastructure repo.
+
+### Contributing back to upstream
+
+`affine-cm9` allows ADDITIVE changes to be upstreamed and forbids FORK-LOCAL CORE
+PATCHes from ever reaching `toeverything/AFFiNE`. Three things enforce that, all
+calling `scripts/woven-manifest-guard.sh --outbound`:
+
+1. `scripts/woven-upstream-branch.sh [--from REF] [--no-switch] <name> <path>...`
+   — branches from the upstream baseline rather than `woven/main`, so the branch
+   cannot carry a fork-local patch. Start here.
+2. `.husky/pre-push` — refuses a push whose destination is `UPSTREAM_REPO`, **or**
+   whose branch is named `upstream/**`, regardless of destination. The branch-name
+   check is what covers the normal flow below: `git push origin upstream/<name>`
+   lands on the FORK, so a destination-only check would exit 0 and never see it.
+   Bypassable with `git push --no-verify`.
+3. CI on push to `upstream/**` — the backstop for a push the hook did not see, but
+   **only** for a hand-made `upstream/**` branch. A branch `woven-upstream-branch.sh`
+   built starts at the upstream baseline and carries none of this fork's files, so
+   the CI workflow itself does not exist on it and cannot run — `.husky/pre-push`'s
+   branch-name check is the only thing covering a prepared branch at push time.
+
+The prepared branch is a starting point: review, cherry-pick and squash it as
+needed. The clean result the preparer reports describes the branch at creation,
+not the branch you eventually push — which is why the last two exist.
+
+`--outbound` only judges a branch that is already inbound-clean: it runs the
+unmanifested-row and stale-row checks first and refuses to judge a branch that
+fails them, so a manifest row the parser cannot read can never silently pass a
+fork-local patch through. An unrecognised category in
+`scripts/woven-patch-manifest.md` exits 2 rather than being assumed ADDITIVE.
+
+#### Opening the PR
+
+This is the riskiest step, and the one the `affine-hn1.2` near-miss actually
+happened on. Push to **origin** — never to `upstream` — then name the base repo
+explicitly:
+
+```bash
+git push origin upstream/<name>
+gh pr create --repo toeverything/AFFiNE --base canary --head aRustyDev:upstream/<name>
+```
+
+Run this once per clone:
+
+```bash
+gh repo set-default aRustyDev/AFFiNE
+```
+
+`gh` defaults to the **parent** repository when an `upstream` remote exists, and
+that default is exactly what caused the near-miss: an unqualified `gh pr create`
+targeted `toeverything/AFFiNE` with a `woven/main` base, and only failed because
+that branch does not exist there (`Base ref must be a branch`). This fork's
+`origin` also carries upstream's branch names — `origin/canary` among them — so a
+PR based on a shared name would have gone through. `--repo` and `--head
+owner:branch` above make the target explicit regardless of the default;
+`gh repo set-default` closes the hole for everything else, but it is per-clone git
+config — a fresh clone starts unprotected, so treat it as a convenience, not a
+control.
+`scripts/woven-manifest-guard.sh --dump-rows` shows exactly what the parser and
+classifier saw for each row, if one of the three layers above refuses something
+unexpectedly.

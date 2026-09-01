@@ -4,26 +4,88 @@ name: woven-manifest-guard
 # NOT an edit to upstream's build-test.yml. Enforces scripts/woven-patch-manifest.md
 # — bead affine-hn1.2, epic affine-hn1, strategy affine-cm9.
 #
-# TRIGGER, deliberately: `pull_request:`, not `push:`. Upstream's build-test.yml
-# `push:` list covers canary/beta/stable/v*.x and NOT woven/*, so a guard wired to
-# push: would never fire on this fork — see merge-time checklist step 6 in the
-# manifest. PRs into woven/main are the only chokepoint that actually runs.
+# THREE TRIGGERS, one per direction this guard enforces (affine-hn1.4 added
+# the second; the first predates it and this comment used to describe only
+# that one — corrected here because it had gone stale in a way that was
+# actively misleading eight lines above a `push:` trigger):
 #
-# No paths-ignore: ANY changed file could be upstream-owned, so the guard has to
-# see every PR.
+#   pull_request: woven/main — INBOUND. Upstream's own build-test.yml `push:`
+#     list covers canary/beta/stable/v*.x and NOT woven/*, so a guard wired
+#     to `push:` would never fire on THAT workflow's terms; PRs into
+#     woven/main are the chokepoint every fork change actually passes
+#     through (merge-time checklist step 7 in the manifest).
+#
+#   push: upstream/** — OUTBOUND backstop. A workflow in this fork cannot
+#     gate a PR into toeverything/AFFiNE: `pull_request` runs workflows from
+#     the BASE repo, so a PR into upstream runs upstream's workflows and
+#     this one never executes there. Enforcement has to fire strictly
+#     earlier, on this fork, keyed on the only signal available — the
+#     `upstream/**` branch prefix `scripts/woven-upstream-branch.sh` applies
+#     for you. This trigger only ever fires for a HAND-MADE upstream/**
+#     branch: a branch built by that script starts at the upstream baseline
+#     and carries none of this fork's files, so this workflow does not exist
+#     on it and cannot run there at all — `.husky/pre-push`'s branch-name
+#     check is what covers that case instead (see DESIGN.md, "Why layer 3
+#     cannot cover the prepared branch").
+#
+#   workflow_dispatch — manual re-run.
+#
+# No paths-ignore on the inbound trigger: ANY changed file could be
+# upstream-owned, so the guard has to see every PR.
 
 on:
   pull_request:
     branches:
       - woven/main
+  # OUTBOUND backstop — see the trigger list in the file header for why this
+  # exists and what it does not cover.
+  push:
+    branches:
+      - 'upstream/**'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  fixtures:
+    name: Guard fixtures
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 is REQUIRED. Several fixtures build throwaway commits
+      # parented on the upstream baseline, which is reachable only as a merge
+      # parent — a shallow checkout cannot resolve it and they fail as exit 2.
+      - name: Checkout (full history — baseline is a merge parent)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Manifest guard fixtures
+        run: scripts/woven-manifest-guard.test.sh
+
+      - name: Branch-preparer fixtures
+        run: scripts/woven-upstream-branch.test.sh
+
+      - name: Pre-push hook fixtures
+        run: scripts/woven-pre-push.test.sh
+
+      # The sweep itself is NOT run in CI — bd needs a shared Dolt server that
+      # runners cannot reach — but its fixtures use a frozen bead corpus, so the
+      # affine-hn1.3 v0.27.4 dry-run stays permanently verified.
+      - name: Drift-sweep fixtures (frozen v0.27.4 dry-run)
+        run: scripts/woven-drift-sweep.test.sh
+
   manifest-guard:
     name: Upstream divergence is manifested
+    # Expressed positively (pull_request OR dispatch), not as "not push": a
+    # negation reads correctly today only because push: currently has exactly
+    # one branch pattern. Add a second push: branch later — for anything other
+    # than upstream/** — and "not push" would silently stop running the
+    # inbound verdict there while upstream-leak-guard below starts running
+    # (and failing, since an inbound-dirty branch fails --outbound's own
+    # inbound-clean precondition) on a ref this check was never meant to gate.
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    needs: fixtures
     runs-on: ubuntu-latest
     steps:
       # fetch-depth: 0 is REQUIRED. The baseline is the upstream commit the fork
@@ -36,14 +98,26 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Guard fixtures (self-test)
-        run: scripts/woven-manifest-guard.test.sh
-
-      # The sweep itself is NOT run in CI — bd needs a shared Dolt server that
-      # runners cannot reach — but its fixtures use a frozen bead corpus, so the
-      # affine-hn1.3 v0.27.4 dry-run stays permanently verified.
-      - name: Drift-sweep fixtures (frozen v0.27.4 dry-run)
-        run: scripts/woven-drift-sweep.test.sh
-
       - name: Manifest guard
         run: scripts/woven-manifest-guard.sh
+
+  upstream-leak-guard:
+    name: No fork-local patch on an upstream branch
+    # Gated on the REF, not just the event: keying this solely on
+    # `github.event_name == 'push'` would make it start running (and failing)
+    # on any push: branch added later that isn't upstream/** — see the note
+    # on manifest-guard's `if:` above, which is the other half of that same
+    # failure mode. The `on.push.branches` filter above already restricts
+    # which pushes trigger the workflow at all; this restates it explicitly
+    # so the job's own condition does not silently drift from the trigger.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/upstream/')
+    needs: fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history — baseline is a merge parent)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Outbound leak guard
+        run: scripts/woven-manifest-guard.sh --outbound

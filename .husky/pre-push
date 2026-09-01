@@ -1,0 +1,254 @@
+# woven pre-push — refuse to push a FORK-LOCAL CORE PATCH to upstream.
+#
+# git passes the remote NAME as $1 and the remote URL as $2. We key on the URL:
+# a remote called "upstream" proves nothing, and a second remote pointing at the
+# same place would slip past a name check. UPSTREAM_REPO lives in
+# scripts/woven-upstream-baseline, next to the commit pin.
+#
+# Guards the branch TIP against the baseline rather than the pushed range: git
+# supplies the range on stdin, and the remote sha is all-zeros for a branch the
+# remote has not seen. The tip-vs-baseline comparison is the one the guard
+# already makes, and has no such edge case.
+#
+# Pure sh, no node: this must work in a checkout where nothing is installed.
+#
+# This is a seatbelt, not a lock — `git push --no-verify` walks past it. The CI
+# job on upstream/** is the backstop.
+#
+# ALSO GUARDS ON BRANCH NAME, NOT ONLY DESTINATION: a branch named
+# upstream/** declares where it is headed regardless of where THIS push
+# lands. The realistic flow is `git push origin upstream/foo` followed by a
+# cross-fork PR — the destination on that push is the FORK, so the URL check
+# above exits 0 and never sees the risk. This is the only thing that covers
+# that flow; see DESIGN.md, "Why layer 3 cannot cover the prepared branch"
+# (a branch built by scripts/woven-upstream-branch.sh does not carry the CI
+# workflow, so a push-triggered backstop cannot fire on it at all).
+#
+# That check needs the REMOTE ref name for each ref being pushed, which git
+# supplies only on stdin (`<local ref> <local sha> <remote ref> <remote
+# sha>`, one line per ref) — argv carries only the remote's name and URL.
+# Reading stdin here is exactly what the paragraph above says this hook does
+# not do, so the read is bounded and defensive: see the dedicated comment
+# below, at the point it happens, for why and for what it does not cover.
+#
+# EXIT CODES (mirrors woven-manifest-guard.sh's contract)
+#   0  not headed to upstream, or headed there and confirmed clean
+#   1  confirmed policy violation — the guard found a FORK-LOCAL CORE PATCH
+#   2  usage or environment error — this hook could not establish an answer,
+#      so it refuses out of caution rather than reporting "not upstream"
+#
+# FAIL-CLOSED BY DESIGN: every check below that cannot establish "this push is
+# definitely not headed to upstream" exits 2 instead of 0. An empty destination
+# URL, an unresolvable repo root, a missing or unparseable baseline, a value
+# read from the baseline that does not survive validation, and a missing or
+# unusable guard are all silence that would otherwise be read as success.
+# `--no-verify` remains the escape hatch for a genuinely broken environment;
+# this hook does not hand out an equivalent for free by exiting 0 when it does
+# not know the answer.
+#
+# Husky invokes this file as `sh -e`. Every check here already does its own
+# explicit exit, so errexit adds nothing but a risk: a plain
+# `x="$(cmd)"` assignment aborts the whole script the instant `cmd` fails,
+# before the surrounding `if` can print the diagnostic or before a later
+# guard_rc dispatch can run. `set +e` neutralises that regardless of how this
+# file is invoked, so every failure is handled by the code that names it.
+#
+# TESTING SEAM: WOVEN_GUARD overrides the guard binary invoked below (default
+# scripts/woven-manifest-guard.sh) — the same seam, and the same reason, as
+# scripts/woven-upstream-branch.sh. It is what lets a fixture force a violation
+# (exit 1) or a clean result (exit 0) from the guard on demand, so the hook's
+# own dispatch logic can be tested without depending on what the current branch
+# happens to carry — a fixture that depends on the branch's content will rot.
+set +e
+
+remote_url="${2:-}"
+if [ -z "$remote_url" ]; then
+  printf '%s\n' "[woven pre-push] no remote URL supplied (\$2 empty) — cannot confirm this push is not headed to upstream. Refusing." >&2
+  exit 2
+fi
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$repo_root" ]; then
+  printf '%s\n' "[woven pre-push] could not resolve the repository root — refusing rather than pushing blind." >&2
+  exit 2
+fi
+
+baseline="$repo_root/scripts/woven-upstream-baseline"
+guard="${WOVEN_GUARD:-$repo_root/scripts/woven-manifest-guard.sh}"
+
+if [ ! -f "$baseline" ]; then
+  printf '%s\n' "[woven pre-push] baseline file missing ($baseline) — cannot tell upstream from anywhere else. Refusing." >&2
+  exit 2
+fi
+
+# Trimmed and shape-checked, not just non-empty: a bare `-z` check treats a
+# baseline line with trailing whitespace ("UPSTREAM_REPO=toeverything/AFFiNE ")
+# as a valid, non-empty needle — it IS non-empty, it simply then matches no
+# real URL, so every push (including a real one to upstream) falls through the
+# case statement below to its "not upstream" exit with no diagnostic at all.
+# Trimming closes the whitespace form of that; the owner/repo shape check
+# below closes the rest of it (a stray comment fragment, a copy-paste of the
+# whole line, anything else that is non-empty but not a repo identifier).
+upstream_repo="$(sed -n 's/^UPSTREAM_REPO=//p' "$baseline" | head -1 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+if [ -z "$upstream_repo" ]; then
+  printf '%s\n' "[woven pre-push] UPSTREAM_REPO not found or empty in $baseline — cannot tell upstream from anywhere else. Refusing." >&2
+  exit 2
+fi
+if ! printf '%s\n' "$upstream_repo" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+  printf '%s\n' "[woven pre-push] UPSTREAM_REPO in $baseline does not look like owner/repo (got '$upstream_repo') — refusing rather than guessing what upstream is." >&2
+  exit 2
+fi
+
+# Case-insensitively substring-match owner/repo against the URL, with and
+# without a .git suffix and with any number of trailing slashes. Trailing
+# slashes are stripped BEFORE the .git suffix, not after: "AFFiNE.git/" ends in
+# neither ".git" nor "/" immediately after the owner/repo, so stripping only
+# "\.git$" leaves it matching neither case pattern below and the push sails
+# through unnoticed. Normalising the slash first is what closes that hole.
+needle="$(printf '%s' "$upstream_repo" | tr '[:upper:]' '[:lower:]')"
+haystack="$(printf '%s' "$remote_url" | tr '[:upper:]' '[:lower:]' | sed -e 's:/*$::' -e 's/\.git$//')"
+
+# A validated, non-empty $remote_url that normalises to an empty $haystack
+# would otherwise fall through the case below to "not upstream" with nothing
+# to say why — the same absence-as-success shape as everything else on this
+# page, just arriving from the other input.
+if [ -z "$haystack" ]; then
+  printf '%s\n' "[woven pre-push] could not normalise the destination URL ($remote_url) for comparison — refusing rather than guessing." >&2
+  exit 2
+fi
+
+destination_is_upstream=0
+case "$haystack" in
+  *"$needle") destination_is_upstream=1 ;;
+  *"$needle"/*) destination_is_upstream=1 ;;
+  *) ;;
+esac
+
+# BRANCH-NAME INTENT: only consulted when the destination alone did not
+# already condemn this push — a destination match is already sufficient, and
+# skipping the stdin read in that case keeps the actual-upstream path exactly
+# as it was before this check existed.
+#
+# `upstream_branch_push` is set to 1 if any ref being pushed will exist on
+# the REMOTE, once this push lands, under refs/heads/upstream/**. That is why
+# this reads the REMOTE ref field and not `git symbolic-ref --quiet --short
+# HEAD` (the currently checked-out local branch): the simpler current-branch
+# check was considered and rejected because it is wrong for
+# `git push origin HEAD:upstream/foo` (whatever is checked out is not named
+# "upstream/foo") and blind to pushing a branch you are not currently on at
+# all. The remote ref is the name a cross-fork PR's --head names and the
+# same one CI's `push: branches: upstream/**` trigger matches, so it is the
+# correct signal even though obtaining it costs a stdin read.
+#
+# What this does NOT cover: a push that renames the branch on the wire
+# (`git push origin upstream/foo:something-else`) never reports
+# "upstream/*" as the remote ref, so neither this check nor layer 3's CI
+# trigger sees any signal from the name — that defeats the naming
+# convention itself, not this particular way of reading it.
+upstream_branch_push=0
+if [ "$destination_is_upstream" -eq 0 ]; then
+  # Pre-push reports the push as "<local ref> <local sha> <remote ref>
+  # <remote sha>" lines on stdin — the only place the remote ref name is
+  # available. The file header explains why this hook otherwise avoids
+  # stdin: an unbounded read can hang forever on a pipe nothing ever closes.
+  # This read stays bounded: a background `cat` copies stdin to a scratch
+  # file, a second background process kills that `cat` after a short
+  # timeout, and whatever was captured by then — including nothing — is
+  # what gets parsed. A real git invocation writes every ref line and closes
+  # stdin immediately, so this always finishes well inside the bound; the
+  # bound exists only for a stdin that will never produce more (a terminal
+  # that is never typed into) or a pipe some other process holds open
+  # without closing. Both are exercised directly by
+  # scripts/woven-pre-push.test.sh, not inferred from reasoning about them.
+  #
+  # `[ -t 0 ]` short-circuits the terminal case without waiting out the
+  # timeout at all: nothing will ever arrive on an interactive stdin, so
+  # there is nothing to gain from starting the background read.
+  #
+  # `exec 3<&0` duplicates the real stdin onto fd 3 BEFORE anything is
+  # backgrounded. This is required, not decorative: POSIX assigns an
+  # asynchronous command's stdin to /dev/null unless it explicitly
+  # redirects otherwise, so `( cat >"$tmp" ) &` below would silently read
+  # from /dev/null instead of the pipe, on every shell tested while writing
+  # this (both dash and this workstation's bash-as-sh) — this is not a
+  # single-implementation quirk to special-case around. Backgrounding `cat
+  # <&3` instead reads the fd we saved before that substitution happened.
+  if [ ! -t 0 ]; then
+    push_refs_tmp="$(mktemp 2>/dev/null)"
+    if [ -z "$push_refs_tmp" ]; then
+      # Could not even set up the bounded read — an environment failure,
+      # not "nothing was pushed". Fail closed rather than silently losing
+      # the branch-name signal this whole check exists to provide.
+      printf '%s\n' "[woven pre-push] could not create a scratch file to read the push refs (mktemp failed) — refusing rather than skipping the branch-name check." >&2
+      exit 2
+    fi
+    exec 3<&0
+    ( cat <&3 >"$push_refs_tmp" 2>/dev/null ) &
+    cat_pid=$!
+    ( sleep "${WOVEN_PRE_PUSH_STDIN_TIMEOUT:-2}" 2>/dev/null; kill "$cat_pid" 2>/dev/null ) &
+    timer_pid=$!
+    wait "$cat_pid" 2>/dev/null
+    kill "$timer_pid" 2>/dev/null
+    wait "$timer_pid" 2>/dev/null
+    exec 3<&-
+
+    # `|| [ -n "$push_local_ref" ]` is deliberate: `read` returns non-zero at
+    # EOF even on a final line it DID successfully populate, if that line
+    # has no trailing newline. Without this, such a line is silently
+    # dropped instead of parsed — the same failure shape as everything else
+    # on this page, just triggered by a missing byte instead of a missing
+    # value.
+    while IFS=' ' read -r push_local_ref push_local_sha push_remote_ref push_remote_sha || [ -n "$push_local_ref" ]; do
+      [ -z "$push_local_ref" ] && continue
+      # An all-zero local sha means this line is a pure deletion
+      # (`git push origin :upstream/foo`) — nothing is being SENT, so there
+      # is no content for the guard to judge and no reason to run it.
+      case "$push_local_sha" in
+        0000000000000000000000000000000000000000) continue ;;
+      esac
+      case "$push_remote_ref" in
+        refs/heads/upstream/*) upstream_branch_push=1 ;;
+      esac
+    done < "$push_refs_tmp"
+
+    rm -f "$push_refs_tmp"
+  fi
+fi
+
+if [ "$destination_is_upstream" -eq 1 ]; then
+  printf '%s\n' "[woven pre-push] destination is UPSTREAM ($upstream_repo) — running the outbound guard." >&2
+elif [ "$upstream_branch_push" -eq 1 ]; then
+  printf '%s\n' "[woven pre-push] pushing a branch named upstream/** — running the outbound guard regardless of destination ($remote_url)." >&2
+else
+  exit 0
+fi
+
+if [ ! -x "$guard" ]; then
+  printf '%s\n' "[woven pre-push] guard not found or not executable ($guard) — cannot verify this push is clean. Refusing." >&2
+  exit 2
+fi
+
+# Capture the real code and dispatch on it explicitly, same as
+# scripts/woven-upstream-branch.sh: the guard's own contract is 0 clean / 1
+# policy violation / 2 usage-or-environment error. Collapsing those with a
+# bare `if ! "$guard"` would report an unresolvable baseline or an unparseable
+# manifest row (exit 2) as "your file is a fork-local patch" (exit 1) — a
+# misdiagnosis that sends the user to scripts/woven-upstream-branch.sh, which
+# will fail the exact same way for the exact same reason.
+"$guard" --outbound --head HEAD
+guard_rc=$?
+case "$guard_rc" in
+  0)
+    exit 0
+    ;;
+  1)
+    printf '%s\n' "[woven pre-push] PUSH REFUSED. This branch carries a FORK-LOCAL CORE PATCH." >&2
+    printf '%s\n' "[woven pre-push] Prepare an upstream branch instead:" >&2
+    printf '%s\n' "[woven pre-push]   scripts/woven-upstream-branch.sh <name> <path>..." >&2
+    exit 1
+    ;;
+  *)
+    printf '%s\n' "[woven pre-push] the guard could not judge this branch (exit $guard_rc) — see its output above. Refusing." >&2
+    exit 2
+    ;;
+esac
