@@ -70,6 +70,29 @@ run_hook_strict() { sh -e "$HOOK" "$1" "$2" >"$OUT" 2>&1 </dev/null; RC=$?; }
 # from an arbitrary directory — used by the environment-error fixtures below,
 # which need control over either argv or the invocation directory.
 run_hook_argv() { ( cd "$1" && shift && sh "$HOOK" "$@" >"$OUT" 2>&1 </dev/null ); RC=$?; }
+# For the branch-name-intent fixtures: $3 is synthetic "<local ref> <local
+# sha> <remote ref> <remote sha>" ref-line content, exactly as git itself
+# would put on stdin. It is written to a scratch file and fed in via `<`,
+# NOT piped in — a shell function on the right end of a pipe runs in a
+# subshell in bash, so the `RC=$?` below would update a copy that vanishes
+# with the subshell instead of the caller's $RC (verified: piping into this
+# function was tried first, and every fixture using it misreported rc=2
+# regardless of the hook's actual, correctly-printed exit code).
+# WOVEN_PRE_PUSH_STDIN_TIMEOUT overrides the hook's bounded-read timeout so
+# the hang-prevention fixtures do not have to wait out the production
+# default to prove they do not hang.
+run_hook_stdin() {
+  # printf '%s\n', not '%s': $3 arrives via a $(...) command substitution
+  # (to build it with the shared printf format below), which strips its
+  # trailing newline — so a naive '%s' would write a final ref line with NO
+  # terminating newline, and the hook's `while read` loop silently skips a
+  # final line that is not newline-terminated. Verified: that exact bug
+  # made every branch-name fixture below pass or fail for the wrong reason
+  # (the loop body never ran at all) before this fix.
+  printf '%s\n' "$3" >"$TMPDIR_T/stdin_refs.txt"
+  WOVEN_PRE_PUSH_STDIN_TIMEOUT="${WOVEN_PRE_PUSH_STDIN_TIMEOUT:-1}" sh "$HOOK" "$1" "$2" <"$TMPDIR_T/stdin_refs.txt" >"$OUT" 2>&1
+  RC=$?
+}
 dump()     { sed 's/^/     | /' "$OUT" >&2; }
 # Literal (-F) substring match against the last run's captured output — the
 # thing that actually distinguishes "the check this fixture names fired" from
@@ -338,6 +361,85 @@ if chmod_grants_x; then
   fi
 else
   echo "   (skipped: this filesystem did not honor chmod +x for a fresh file — verified at runtime; ubuntu-latest CI does not skip this)"
+fi
+
+echo
+echo "== branch-name intent: upstream/** guards the push regardless of destination =="
+SHA_A="1111111111111111111111111111111111111111"
+SHA_B="2222222222222222222222222222222222222222"
+ZERO_SHA="0000000000000000000000000000000000000000"
+FORK_URL="https://github.com/aRustyDev/AFFiNE.git"
+
+echo "-- an upstream/** branch pushed to the FORK is still guarded (this is the gap the review found)"
+WOVEN_GUARD="$STUB_VIOLATION" run_hook_stdin "origin" "$FORK_URL" \
+  "$(printf 'refs/heads/upstream/oidc-fix %s refs/heads/upstream/oidc-fix %s\n' "$SHA_A" "$ZERO_SHA")"
+if [ "$RC" -eq 1 ] && has_msg "FORK-LOCAL CORE PATCH" && has_msg "pushing a branch named upstream/**"; then
+  ok "refused an upstream/** branch pushed to the fork, keyed on the branch name alone"
+else
+  bad "did not refuse an upstream/** branch pushed to the fork (rc=$RC)"; dump
+fi
+
+echo "-- an upstream/** branch pushed to the FORK, guard reports clean: allowed"
+WOVEN_GUARD="$STUB_CLEAN" run_hook_stdin "origin" "$FORK_URL" \
+  "$(printf 'refs/heads/upstream/build-test %s refs/heads/upstream/build-test %s\n' "$SHA_A" "$ZERO_SHA")"
+if [ "$RC" -eq 0 ]; then
+  ok "allowed an upstream/** branch pushed to the fork when the guard reports clean"
+else
+  bad "refused a clean upstream/** branch — false positive"; dump
+fi
+
+echo "-- an ORDINARY branch pushed to the fork is not guarded by name (would be refused if it were)"
+WOVEN_GUARD="$STUB_VIOLATION" run_hook_stdin "origin" "$FORK_URL" \
+  "$(printf 'refs/heads/feature/widgets %s refs/heads/feature/widgets %s\n' "$SHA_A" "$ZERO_SHA")"
+if [ "$RC" -eq 0 ] && [ ! -s "$OUT" ]; then
+  ok "an ordinary branch name to the fork stays silent and exit 0, even though the stubbed guard would refuse"
+else
+  bad "an ordinary branch to the fork was not silently allowed (rc=$RC)"; dump
+fi
+
+echo "-- deleting an upstream/** ref does not trigger the guard (nothing is actually being sent)"
+WOVEN_GUARD="$STUB_VIOLATION" run_hook_stdin "origin" "$FORK_URL" \
+  "$(printf '(delete) %s refs/heads/upstream/oidc-fix %s\n' "$ZERO_SHA" "$SHA_B")"
+if [ "$RC" -eq 0 ] && [ ! -s "$OUT" ]; then
+  ok "a pure deletion of an upstream/** ref is not treated as a push of one"
+else
+  bad "a deletion of an upstream/** ref was treated as a push (rc=$RC) — nothing was actually sent"; dump
+fi
+
+echo "-- a destination match still fires (and is reported) even when the branch name would not have"
+WOVEN_GUARD="$STUB_VIOLATION" run_hook_stdin "origin" "https://github.com/toeverything/AFFiNE.git" \
+  "$(printf 'refs/heads/feature/widgets %s refs/heads/feature/widgets %s\n' "$SHA_A" "$ZERO_SHA")"
+if [ "$RC" -eq 1 ] && has_msg "FORK-LOCAL CORE PATCH" && has_msg "destination is UPSTREAM"; then
+  ok "an upstream destination is refused via the destination message, not the branch-name one"
+else
+  bad "destination-triggered refusal regressed (rc=$RC)"; dump
+fi
+
+echo
+echo "== branch-name intent: reading stdin for it must never hang =="
+echo "-- no stdin redirect at all does not hang"
+timeout 5 sh "$HOOK" "origin" "$FORK_URL" >"$OUT" 2>&1
+RC=$?
+if [ "$RC" -ne 124 ]; then
+  ok "completed without an explicit stdin redirect (rc=$RC, not killed by the outer timeout)"
+else
+  bad "hung with no stdin redirect at all — killed by the outer timeout"; dump
+fi
+
+echo "-- a writer that holds the pipe open without ever closing it does not hang"
+FIFO="$TMPDIR_T/held-open.fifo"
+mkfifo "$FIFO"
+( exec 3>"$FIFO"; sleep 30; exec 3>&- ) &
+holder_pid=$!
+WOVEN_PRE_PUSH_STDIN_TIMEOUT=1 timeout 10 sh "$HOOK" "origin" "$FORK_URL" <"$FIFO" >"$OUT" 2>&1
+RC=$?
+kill "$holder_pid" 2>/dev/null
+wait "$holder_pid" 2>/dev/null
+rm -f "$FIFO"
+if [ "$RC" -ne 124 ]; then
+  ok "completed while a writer held the pipe open without closing it (rc=$RC, not killed by the outer timeout)"
+else
+  bad "hung on a pipe held open by another process — killed by the outer timeout"; dump
 fi
 
 echo
