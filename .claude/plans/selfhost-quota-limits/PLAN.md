@@ -3,8 +3,13 @@
 > **FORK-LOCAL CORE PATCH. MUST NEVER appear in an upstream-directed PR.** Per `affine-cm9`
 > (fork strategy) and `scripts/woven-agent-bootstrap.md` §0, which names the member/seat-limit
 > removal (`affine-vap`) as the fork's canonical never-upstream patch.
-> Status: **IN PROGRESS — grounded 2026-09-01 against HEAD `c6fc3b2dec`. Tasks 0–5 done
-> (`IMPLEMENTATION.md` carries the as-built notes); Task 6 (deploy config + PR) remains.**
+> Status: **CODE COMPLETE, NOT YET SHIPPED — grounded 2026-09-01 against HEAD `c6fc3b2dec`.**
+> Tasks 0–5 done and verified (`IMPLEMENTATION.md` carries the as-built notes). 39 tests pass;
+> `scripts/woven-ci-min.sh` reports ALL GATE CHECKS PASSED; inbound manifest guard exits 0 and the
+> outbound guard **names** `core/quota/state.ts`. Nothing is pushed. Task 6 remains and is not the
+> implementer's to finish: the three knobs and `auth.inviteQuotaShadowMode` must be set in the
+> fork's **deploy config** (outside this repo), then the PR opened explicitly against the fork, and
+> only then `bd close affine-vap`.
 > Beads: `affine-vap` (this plan). Mode B — a self-minted self-host Team license — is split
 > out as its own bead depending on `affine-vap`; its research is preserved here in
 > [findings/mode-b-license-format.md](findings/mode-b-license-format.md).
