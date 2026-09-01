@@ -32,7 +32,7 @@ server at the _wrong_ populated database is detected instead of half-migrated.
 | Doc                                                      | What                                                                                                                                      |
 | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | [findings/grounding.md](findings/grounding.md)           | Verified facts, all measured on this tree: deployment topology, migration-corpus scan, `app_configs` namespace hazard, Nest boot ordering |
-| [findings/decision-log.md](findings/decision-log.md)     | D1–D20, plus D4a and D4b                                                                                                                  |
+| [findings/decision-log.md](findings/decision-log.md)     | D1–D22, plus D4a and D4b                                                                                                                  |
 | [findings/open-questions.md](findings/open-questions.md) | OQ-1, OQ-2 resolved 2026-09-01; OQ-3 (CI gating) and OQ-4 (data migrations) open                                                          |
 | [PLAN.md](PLAN.md)                                       | The task-by-task implementation plan derived from this design                                                                             |
 

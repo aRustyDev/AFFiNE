@@ -225,8 +225,47 @@ calls; D5–D10 follow from them plus the grounding measurements.
   `populated`, so `hasMigrationsTable: true` with zero users — precisely the state a fresh install
   is in after D17's `db check → migrate → db stamp` sequence — logged "ADOPTING pre-existing
   database" about a database with no data, and with a `BLOCKING` pending migration would refuse
-  "adoption of a pre-existing database" holding zero rows. Adoption is about taking ownership of
-  pre-existing **data**, and `populated` is exactly that signal. _Status: accepted (T3 review)._
+  "adoption of a pre-existing database" holding zero rows. _Status: accepted (T3 review), then
+  **amended by D21** — as first written it caused a fail-open._
+
+- **D21 — `populated` means "any content", and the BLOCKING gate runs BEFORE the fresh-install
+  return.** D19 was drafted as "select `fresh-install` and suppress the gate". The word _suppress_
+  was a mistake: I wanted a relabel and specified a bypass, and it was implemented faithfully.
+
+  Two independent errors compounded. First, `populated` was `user.count() > 0`, and **AFFiNE
+  deliberately preserves content when users are deleted** — `Workspace` has no foreign key to
+  `User`, `Snapshot.createdByUser` is `onDelete: SetNull` with a schema comment saying snapshots
+  outlive users, and `Blob` cascades from `Workspace`. So zero users does not mean zero data (G7a).
+  Second, the fresh-install return sat in front of the BLOCKING check, so the gate was skipped
+  rather than merely relabelled.
+
+  Measured result before the fix: 2 workspaces, 0 users, unstamped, one real contracting migration
+  pending → `check()` returned `ok: true, adopt: 'fresh-install'`, silently, at LOG level, and
+  durably recorded `fresh-install`. Routine trigger: clone production to staging and truncate
+  `users` to scrub PII.
+
+  Both halves fixed: `populated` is now users **OR** workspaces (null if either read hits an
+  undefined table), and the gate runs first, so correctness no longer depends on `populated` being
+  right. `VIRGIN` still bypasses — a virgin database has all 117 migrations pending, 17 of them
+  BLOCKING, and gating a fresh install would be absurd; a genuinely fresh post-migrate install has
+  nothing pending, so the gate is a no-op there anyway.
+
+  The lesson, since this is the second time: **an instruction that says "suppress the gate" will get
+  the gate suppressed.** Say what to relabel, not what to skip. _Status: accepted (T3 re-review)._
+
+- **D22 — the initial deployment stamp is first-writer-wins.** `stamp()` was read-modify-write with
+  no coordination. Two pods running `db stamp` on an unstamped database both see `identity: absent`,
+  and with `AFFINE_DEPLOYMENT_ID` unset — the day-one default D5 explicitly supports — each mints
+  its own UUID; last writer wins. The loser has already logged
+  `set AFFINE_DEPLOYMENT_ID=<UUID-A>` while the database holds UUID-B, so an operator following the
+  ratchet's own instruction gets `IDENTITY_MISMATCH` and a server that refuses to boot. Reachable
+  with `replicas: 2` on a fresh install, since `db stamp` runs per-pod in the initContainer.
+
+  Initial adoption now uses `create()` and, on a unique violation, re-reads and falls through to the
+  `lastMigratedBy` update — and **logs the persisted id, not the minted one**, which is the half
+  that actually prevents the bricking. In-repo precedent for the alternative: `AppConfigModel.save()`
+  takes `pg_advisory_xact_lock` before touching `app_configs`, so this codebase already treats
+  concurrent writes there as needing coordination. _Status: accepted (T3 re-review)._
 
 - **D20 — `CompatDecision` carries `bootMayContinue`.** The `REFUSING_VERDICTS` branch and the
   `UNREADABLE` branch returned byte-identical decisions, so the boot guard had to reach into

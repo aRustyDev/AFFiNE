@@ -309,6 +309,33 @@ that the cache is only populated on a truthy result — a false stays re-queried
 Consumers: `core/selfhost/controller.ts` and `core/selfhost/setup.ts` (redirect to/from
 `/admin/setup`), and the `initialized` field on the server-config GraphQL resolver.
 
+### G7a — CORRECTION: do NOT reuse the user count as "is this database populated"
+
+G7 originally argued that `db-state.ts` should define `populated` as `user.count() > 0`
+"deliberately, so the two agree about what pre-existing means". **That reasoning was wrong**, and it
+produced a fail-open that shipped into T3 before review caught it.
+
+`initialized()` answers "has someone completed setup". The adoption gate needs "is there content we
+would be taking ownership of". Those are different questions, because **AFFiNE deliberately
+preserves content when users are deleted**:
+
+- `Workspace` has **no foreign key to `User`** at all — there is no owner column.
+- `Snapshot.createdByUser` is `onDelete: SetNull`, and the schema says so in its own comment:
+  _"should not delete origin snapshot even if user is deleted / we only delete the snapshot if the
+  workspace is deleted"_.
+- `Blob` cascades from `Workspace`, not from `User`.
+
+So a database with zero users can hold every workspace, document and blob. Measured consequence
+before the fix: 2 workspaces, 0 users, unstamped, one real contracting migration pending →
+`check()` returned `ok: true, adopt: 'fresh-install'`, silently, at LOG level, and durably recorded
+`fresh-install`. The gate that exists to catch exactly that passed.
+
+Routine trigger, not a hypothetical: cloning production to staging and truncating `users` to scrub
+PII. Also a GDPR erasure sweep, or an admin deleting the last account on a self-hosted instance.
+
+`populated` is therefore now **users OR workspaces**, and `null` if either read hits an undefined
+table. Keep it decoupled from `initialized()`.
+
 ## G8 — A minimal Nest context is viable for the CLI gate
 
 `PrismaFactory` (`src/base/prisma/factory.ts`) takes exactly one dependency, `Config`, and

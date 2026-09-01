@@ -2367,20 +2367,21 @@ dbCommand
 dbCommand
   .command('stamp')
   .description('record the deployment stamp; run AFTER migrations. Idempotent.')
-  .action(async () => {
+  .option('--adopt', 'record the adoption as explicit rather than implicit')
+  .action(async (options: { adopt?: boolean }) => {
     await withMinimalApp(logger, async app => {
-      await app.get(DbCompatService).stamp();
+      await app.get(DbCompatService).stamp({ adopt: options.adopt });
     });
   });
 ```
 
 Two deliberate asymmetries with `check`:
 
-- **No `--adopt` flag.** `stamp()` reads `AFFINE_DB_ADOPT` from the environment to decide whether to
-  record the adoption as `explicit` or `implicit`. That is the same reasoning as D8: the automated
-  caller is the predeploy initContainer, which can be given an env var through the chart's
-  `extraEnv` but cannot be given argv. An operator consenting to an adoption should export the
-  variable, not pass a flag, or the recorded `adoptionMode` will read `implicit`.
+- **`--adopt` is accepted here too**, using the same `options.adopt === true || adoptRequested()`
+  contract as `check`. The automated caller is the predeploy initContainer, which reaches
+  `AFFINE_DB_ADOPT` through the chart's `extraEnv` and cannot be given argv — but an operator
+  running `db check --adopt` manually must not have their consent recorded as `implicit`. That
+  record is the bead's central ask, so the flag has to reach the command that writes it.
 - **No exit-code handling.** `stamp()` declines to write when the verdict refuses and logs why.
   It does not need to gate anything, because `check` already did — before any migration ran.
 
