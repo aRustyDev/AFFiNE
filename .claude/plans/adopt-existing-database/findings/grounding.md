@@ -252,6 +252,34 @@ including deliberately rolled-back ones, so managed rollbacks are not misread. T
 the sharper form — `applied` = `rolled_back_at IS NULL`, with unfinished rows getting their own
 verdict.
 
+### G6a — "Table does not exist" arrives in TWO different error shapes
+
+Found during T2 implementation, after the first version of `db-state.ts` rethrew instead of
+degrading. Reading a missing table produces different errors depending on which Prisma API is used:
+
+| Call                      | Error shape                                                                                                              |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `$queryRaw` (raw SQL)     | Postgres SQLSTATE in `meta.code === '42P01'`                                                                             |
+| `db.user.count()` (model) | `PrismaClientKnownRequestError` with **top-level `code === 'P2021'`**, `meta: { modelName, table }` — **no `meta.code`** |
+
+`readDbState` uses both APIs — raw for `_prisma_migrations` (which has no model in
+`schema.prisma`) and the model API for the user count — so it must recognise both shapes or the
+`VIRGIN` path breaks on a database that has neither table. Checking only the SQLSTATE is the easy
+mistake, because the raw path is the one you think about first.
+
+Locally reproducible: bind a client to an empty schema with `?schema=` on the connection URL and
+call each API.
+
+### G6b — Local test runs need `DATABASE_URL` exported
+
+CI passes `DATABASE_URL: postgresql://affine:affine@localhost:5432/affine` as a job env var
+(`build-test.yml`). Locally it is unset, and the config default in `src/base/prisma/config.ts` is
+`postgresql://localhost:5432/affine` with no credentials, which does not connect. A bare
+`new PrismaClient()` therefore fails outside CI unless the variable is exported.
+
+Also: the development database may be shared with other concurrent work, so tests must derive
+expected values live rather than asserting absolute row counts.
+
 ## G7 — The implicit-adoption path this bead is about
 
 `ServerService.initialized()` (`src/core/config/service.ts`):

@@ -55,6 +55,18 @@ psql -h localhost -U postgres -c "CREATE USER affine WITH PASSWORD 'affine'; ALT
 yarn affine @affine/server prisma generate && yarn affine @affine/server prisma migrate deploy && yarn affine @affine/server data-migration run
 ```
 
+**`DATABASE_URL` must be exported in your shell.** CI supplies it as a job env var; locally it is
+unset, and the config default (`postgresql://localhost:5432/affine`, no credentials) does **not**
+connect. Verified: a bare `new PrismaClient()` fails without it.
+
+```bash
+export DATABASE_URL="postgresql://affine:affine@localhost:5432/affine"
+```
+
+**The development database may be shared with other work.** Do not assert absolute row counts —
+derive expected values in the test (e.g. compare `state.populated` against a live `user.count()`
+rather than a hard-coded number). A count that is stable today can change under you.
+
 T1 needs **no** database — it is pure functions over files on disk.
 
 **Formatting.** `oxfmt` runs over staged files in the pre-commit hook, so no formatting step is
@@ -1177,18 +1189,30 @@ test('readDbState reports the real migration history', async t => {
 });
 
 test('readDbState surfaces a missing table as hasMigrationsTable false, not a throw', async t => {
-  // Point at a schema with no _prisma_migrations. `search_path` is per-session,
-  // so this cannot disturb the real schema used by the other tests.
-  const scratch = new PrismaClient();
-  await scratch.$executeRawUnsafe(
-    'CREATE SCHEMA IF NOT EXISTS db_compat_scratch'
-  );
-  await scratch.$executeRawUnsafe('SET search_path TO db_compat_scratch');
-  const state = await readDbState(scratch);
-  t.false(state.hasMigrationsTable);
-  t.deepEqual(state.rows, []);
-  await scratch.$executeRawUnsafe('DROP SCHEMA db_compat_scratch CASCADE');
-  await scratch.$disconnect();
+  // Bind an EMPTY schema via the connection URL's `?schema=`, not via
+  // `SET search_path`. Prisma pools connections, so a bare SET may land on a
+  // different session than the query that follows it — a flaky test. `?schema=`
+  // is applied per connection, so it holds for every query this client makes.
+  const SCRATCH = 'db_compat_scratch';
+  await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${SCRATCH}"`);
+
+  const url = new URL(process.env.DATABASE_URL as string);
+  url.searchParams.set('schema', SCRATCH);
+  const scratch = new PrismaClient({
+    datasources: { db: { url: url.toString() } },
+  });
+
+  try {
+    const state = await readDbState(scratch);
+    // Neither _prisma_migrations nor users exists in the empty schema, so both
+    // reads must degrade rather than throw.
+    t.false(state.hasMigrationsTable);
+    t.deepEqual(state.rows, []);
+    t.false(state.populated);
+  } finally {
+    await scratch.$disconnect();
+    await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  }
 });
 
 test('readDbState reports populated from the user count', async t => {
@@ -1229,9 +1253,25 @@ interface RawMigrationRow {
 
 const UNDEFINED_TABLE = '42P01';
 
+/**
+ * Prisma Client's own error code for "the model's table does not exist", thrown
+ * by model-based calls like `db.user.count()`. Distinct from the Postgres
+ * SQLSTATE above, which is what a raw `$queryRaw` failure carries.
+ *
+ * Both shapes are needed, and this bit the first implementation: a `$queryRaw`
+ * failure arrives with `meta.code === '42P01'`, but `user.count()` throws
+ * `PrismaClientKnownRequestError` with a TOP-LEVEL `code === 'P2021'` and
+ * `meta: { modelName, table }` — no `meta.code` at all. Handling only the
+ * SQLSTATE makes the second path rethrow instead of degrading.
+ */
+const PRISMA_TABLE_NOT_FOUND = 'P2021';
+
 function isUndefinedTable(error: unknown): boolean {
   if (!error || typeof error !== 'object') {
     return false;
+  }
+  if ((error as { code?: unknown }).code === PRISMA_TABLE_NOT_FOUND) {
+    return true;
   }
   const meta = (error as { meta?: { code?: unknown } }).meta;
   if (meta && String(meta.code) === UNDEFINED_TABLE) {
