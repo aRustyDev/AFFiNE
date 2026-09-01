@@ -8,6 +8,12 @@
 // like upstream), N >= 1 is a FLOOR applied via max(). 0 is rejected: upstream already uses 0
 // to mean "no seats" (state.ts, `quota.seatLimit ?? 0`), which drives overcapacityMemberCount
 // and would make the workspace readonly.
+//
+// getDefaultConfig() validates defaults and env, but CONFIG_JSON_PATHS overrides
+// (~/.affine/config/config.json, the primary self-host mechanism) and ConfigFactory.override
+// are NOT validated. A fractional value can therefore reach applyWovenSelfhostQuota; the real
+// guarantee this file provides is Math.max() applied to a Math.trunc()'d configured value, not
+// schema validation at every entry point.
 import { z } from 'zod';
 
 import { defineModuleConfig } from '../../base';
@@ -25,9 +31,6 @@ declare global {
 }
 
 const INHERIT = -1;
-// seat_limit is `Int @db.Integer` in schema.prisma and is read as i32 by the native
-// invite-abuse policy, so the seat floor cannot exceed int4.
-const INT32_MAX = 2147483647;
 
 function limitShape(max: number) {
   return z
@@ -40,23 +43,36 @@ function limitShape(max: number) {
     });
 }
 
+const INT32_MAX = 2147483647;
+
+export const WOVEN_LIMIT_SHAPES = {
+  // seat_limit is `Int @db.Integer` (int4) in schema.prisma and is read as i32 by the native
+  // invite-abuse policy, so the seat floor cannot exceed int4.
+  selfhostSeatLimit: limitShape(INT32_MAX),
+  // storage_quota / blob_limit are `BigInt @db.BigInt`, but the value passes through a JS
+  // number and `BigInt(...)` in state.ts, so MAX_SAFE_INTEGER — not the int8 range — is the
+  // real ceiling. Widening this would admit a config value that silently changes en route.
+  selfhostStorageQuota: limitShape(Number.MAX_SAFE_INTEGER),
+  selfhostBlobLimit: limitShape(Number.MAX_SAFE_INTEGER),
+};
+
 defineModuleConfig('woven', {
   selfhostSeatLimit: {
-    desc: 'Minimum workspace member limit on self-hosted deployments. -1 inherits the plan value (upstream behavior); N >= 1 raises the limit to at least N and never lowers a licensed plan. Ignored on cloud deployments.',
+    desc: 'Minimum workspace member limit on self-hosted deployments. -1 inherits the plan value (upstream behavior); N >= 1 raises the limit to at least N and never lowers a licensed plan. Ignored on cloud deployments. Plain integer, no units or separators (e.g. 1000, not "1,000").',
     default: INHERIT,
-    shape: limitShape(INT32_MAX),
+    shape: WOVEN_LIMIT_SHAPES.selfhostSeatLimit,
     env: ['WOVEN_SELFHOST_SEAT_LIMIT', 'integer'],
   },
   selfhostStorageQuota: {
-    desc: 'Minimum total workspace storage quota in BYTES on self-hosted deployments. -1 inherits the plan value (upstream behavior). Ignored on cloud deployments.',
+    desc: 'Minimum total storage quota in BYTES on self-hosted deployments; applies to both the workspace and user quota projections. -1 inherits the plan value (upstream behavior). Ignored on cloud deployments. Plain integer byte count, no units or separators (e.g. 107374182400, not "100GB").',
     default: INHERIT,
-    shape: limitShape(Number.MAX_SAFE_INTEGER),
+    shape: WOVEN_LIMIT_SHAPES.selfhostStorageQuota,
     env: ['WOVEN_SELFHOST_STORAGE_QUOTA', 'integer'],
   },
   selfhostBlobLimit: {
-    desc: 'Minimum per-file blob size limit in BYTES on self-hosted deployments. -1 inherits the plan value (upstream behavior). Ignored on cloud deployments.',
+    desc: 'Minimum per-file blob size limit in BYTES on self-hosted deployments. -1 inherits the plan value (upstream behavior). Ignored on cloud deployments. Plain integer byte count, no units or separators (e.g. 104857600, not "100MB").',
     default: INHERIT,
-    shape: limitShape(Number.MAX_SAFE_INTEGER),
+    shape: WOVEN_LIMIT_SHAPES.selfhostBlobLimit,
     env: ['WOVEN_SELFHOST_BLOB_LIMIT', 'integer'],
   },
 });
@@ -67,16 +83,19 @@ type Floorable = {
   seatLimit?: number;
 };
 
-// Identity when configured === INHERIT — including preserving an absent seatLimit as absent,
-// so "unconfigured" is provably indistinguishable from upstream rather than merely equivalent.
-function floorOptional(resolved: number | undefined, configured: number) {
+// configured is truncated at this trust boundary: CONFIG_JSON_PATHS overrides and
+// ConfigFactory.override are not schema-validated, so a fractional override (e.g. a typo'd
+// byte count) must not reach BigInt(...) in state.ts and throw RangeError on every reconcile.
+function floorMaybeAbsent(resolved: number | undefined, configured: number) {
   return configured === INHERIT
     ? resolved
-    : Math.max(resolved ?? 0, configured);
+    : Math.max(resolved ?? 0, Math.trunc(configured));
 }
 
-function floorRequired(resolved: number, configured: number) {
-  return configured === INHERIT ? resolved : Math.max(resolved, configured);
+function floorPresent(resolved: number, configured: number) {
+  return configured === INHERIT
+    ? resolved
+    : Math.max(resolved, Math.trunc(configured));
 }
 
 export function applyWovenSelfhostQuota<T extends Floorable>(
@@ -84,17 +103,23 @@ export function applyWovenSelfhostQuota<T extends Floorable>(
   floors: WovenConfig,
   selfhosted: boolean = env.selfhosted
 ): T {
-  if (!selfhosted) {
+  const allInherit =
+    floors.selfhostSeatLimit === INHERIT &&
+    floors.selfhostStorageQuota === INHERIT &&
+    floors.selfhostBlobLimit === INHERIT;
+
+  // Return the same object, not a copy, so the default (unconfigured) path is identical to
+  // upstream by construction — including preserving an absent seatLimit as absent, which a
+  // field-by-field spread cannot do (`{ ...quota, seatLimit: undefined }` adds an own
+  // enumerable property that upstream never produces).
+  if (!selfhosted || allInherit) {
     return quota;
   }
 
   return {
     ...quota,
-    seatLimit: floorOptional(quota.seatLimit, floors.selfhostSeatLimit),
-    storageQuota: floorRequired(
-      quota.storageQuota,
-      floors.selfhostStorageQuota
-    ),
-    blobLimit: floorRequired(quota.blobLimit, floors.selfhostBlobLimit),
+    seatLimit: floorMaybeAbsent(quota.seatLimit, floors.selfhostSeatLimit),
+    storageQuota: floorPresent(quota.storageQuota, floors.selfhostStorageQuota),
+    blobLimit: floorPresent(quota.blobLimit, floors.selfhostBlobLimit),
   };
 }
