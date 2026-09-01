@@ -14,6 +14,7 @@ export type Verdict =
   | 'DIVERGED'
   | 'IDENTITY_MISMATCH'
   | 'MIGRATION_FAILED'
+  | 'SCHEMA_INCOMPLETE'
   | 'UNREADABLE';
 
 export interface MigrationRow {
@@ -32,7 +33,14 @@ export interface CompatInput {
   migrations: MigrationSet | null;
   hasMigrationsTable: boolean;
   appliedRows: MigrationRow[];
-  populated: boolean;
+  /**
+   * Whether the database has user data. `null` means this could not be
+   * determined (the `users` table itself is missing) — see `DbState.populated`
+   * in `db-state.ts`. `null` must never be treated as `false`: on a database
+   * that otherwise has migration history, an undetermined population is a
+   * schema inconsistency (`SCHEMA_INCOMPLETE`), not evidence of "empty".
+   */
+  populated: boolean | null;
   stamp: DeploymentStamp | null;
   configuredDeploymentId: string | null;
 }
@@ -40,14 +48,45 @@ export interface CompatInput {
 export interface CompatReport {
   verdict: Verdict;
   reason: string;
+  /**
+   * `known`, `applied`, `pending`, `ahead`, and `failed` are computed the
+   * same way regardless of verdict, which makes two of them actively
+   * misleading for particular verdicts. A renderer must special-case these
+   * rather than print them uncritically:
+   *
+   * - `MIGRATION_FAILED`: the half-applied row appears in BOTH `failed` (it
+   *   has no `finishedAt`) and `applied` (it has no `rolledBackAt`) —
+   *   `applied` means "not rolled back", not "successfully finished". This
+   *   is intentional (see the invariant on rolled-back rows in db-state.ts),
+   *   but a renderer must not print the failed migration as if it were also
+   *   cleanly applied.
+   * - `UNREADABLE`: `known: []` and `pending: []`, because the migration set
+   *   could not be loaded at all. Printed plainly this reads as "this binary
+   *   carries no migrations, nothing to do" when the truth is "unknown, we
+   *   couldn't look" — a renderer must suppress these lists for this verdict
+   *   rather than print them.
+   */
   known: string[];
   applied: string[];
   pending: PendingMigration[];
   ahead: string[];
   failed: string[];
-  /** null when the question does not apply (UNREADABLE, VIRGIN, refusals). */
+  /**
+   * Whether image rollback across the newest already-applied migration is
+   * possible. Computed from PENDING migrations only — this engine never
+   * classifies migrations that are already applied, so it never asserts
+   * anything about their reversibility.
+   *
+   * - `VIRGIN` and `DB_BEHIND`: the computed answer, derived from the DDL
+   *   tiers of `pending`.
+   * - `EQUAL`: `null`. Nothing is pending, so there is nothing to classify —
+   *   not "yes": applied migrations were never examined.
+   * - `UNREADABLE`, `MIGRATION_FAILED`, `IDENTITY_MISMATCH`, `DIVERGED`,
+   *   `DB_AHEAD`, `SCHEMA_INCOMPLETE`: `null`. These verdicts refuse
+   *   outright, so the question is moot.
+   */
   rollbackPossible: boolean | null;
-  populated: boolean;
+  populated: boolean | null;
   identity: IdentityState;
 }
 
@@ -57,6 +96,7 @@ export const REFUSING_VERDICTS: ReadonlySet<Verdict> = new Set<Verdict>([
   'DIVERGED',
   'IDENTITY_MISMATCH',
   'MIGRATION_FAILED',
+  'SCHEMA_INCOMPLETE',
 ]);
 
 export function buildReport(input: CompatInput): CompatReport {
@@ -82,13 +122,23 @@ export function buildReport(input: CompatInput): CompatReport {
 
   const pending: PendingMigration[] = migrations
     ? behind.map(name => {
-        const sql = migrations.sql(name);
+        // `sql()` returns null when the migration.sql file is absent — a
+        // legitimately missing migration. It can also THROW (EACCES, EISDIR,
+        // EIO, and other read failures Task 1's fs-based implementation
+        // doesn't itself guard against). A throw here must not propagate: this
+        // report is what `db status` prints, and that command is specified to
+        // always exit 0, precisely because it's the diagnostic an operator
+        // reaches for when something is already wrong. So a read failure is
+        // coerced into the same "unreadable" outcome as an absent file, and
+        // fails CLOSED the same way: BLOCKING, never silently treated as an
+        // empty (and therefore additive-looking) migration.
+        let sql: string | null;
+        try {
+          sql = migrations.sql(name);
+        } catch {
+          sql = null;
+        }
 
-        // `sql()` returns null when the file is absent or unreadable. Fail
-        // CLOSED: a migration we cannot read must not be reported as additive,
-        // which is what treating it as an empty string would do. `classifyDdl`
-        // applies the same rule to SQL it cannot parse (its `unterminated`
-        // flag forces BLOCKING), so both unreadable cases gate consistently.
         if (sql === null) {
           return {
             name,
@@ -97,7 +147,11 @@ export function buildReport(input: CompatInput): CompatReport {
               {
                 tier: 'BLOCKING' as const,
                 rule: 'unreadable-migration',
-                line: 0,
+                line: 1,
+                // There is no statement to quote here — this is a message
+                // describing the failure, not SQL. Task 4's renderer excerpts
+                // `statement` as if it were SQL, so keep this readable as a
+                // plain one-line message rather than SQL-shaped text.
                 statement: `${name}/migration.sql is missing or unreadable`,
               },
             ],
@@ -169,11 +223,25 @@ export function buildReport(input: CompatInput): CompatReport {
     );
   }
 
-  if (!hasMigrationsTable && !populated) {
+  // Migration history is recorded (rows exist / the table exists) but a core
+  // table is missing, so the schema contradicts itself: this is neither a
+  // clean install nor a consistent existing one. `populated === null` and no
+  // migrations table together mean "no history and no data", handled by
+  // VIRGIN below — it's specifically the combination of *having* history
+  // while population is undetermined that is contradictory.
+  if (populated === null && hasMigrationsTable) {
+    return report(
+      'SCHEMA_INCOMPLETE',
+      'the migration history records applied migrations but the users table is absent, so this database is inconsistent',
+      null
+    );
+  }
+
+  if (!hasMigrationsTable && (populated === false || populated === null)) {
     return report(
       'VIRGIN',
       'no migration history and no data — a fresh install',
-      null
+      rollbackPossible
     );
   }
 
@@ -185,5 +253,5 @@ export function buildReport(input: CompatInput): CompatReport {
     );
   }
 
-  return report('EQUAL', 'the database matches this binary', true);
+  return report('EQUAL', 'the database matches this binary', null);
 }

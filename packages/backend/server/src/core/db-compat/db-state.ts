@@ -5,9 +5,18 @@ import type { MigrationRow } from './compat';
 export interface DbState {
   hasMigrationsTable: boolean;
   rows: MigrationRow[];
-  applied: string[];
-  failed: string[];
-  populated: boolean;
+  /**
+   * Whether the database has user data.
+   *
+   * `null` means this could not be determined — the `users` table itself is
+   * missing — and is distinct from `false`, which means the table exists and
+   * was counted as empty. Callers must not collapse `null` into `false`: a
+   * database that has migration history (`hasMigrationsTable: true`) but an
+   * undetermined population is a schema inconsistency, not a fresh install.
+   * See the `SCHEMA_INCOMPLETE` verdict in `compat.ts`, which exists
+   * specifically for this combination.
+   */
+  populated: boolean | null;
 }
 
 interface RawMigrationRow {
@@ -16,11 +25,15 @@ interface RawMigrationRow {
   rolled_back_at: Date | null;
 }
 
+/** Postgres SQLSTATE for "relation does not exist", as surfaced by a raw
+ * `$queryRaw` failure in `error.meta.code`. */
 const UNDEFINED_TABLE = '42P01';
 
 /** Prisma Client's own error code for "the model's table does not exist",
- * thrown by model-based calls like `db.user.count()`. Distinct from the
- * Postgres SQLSTATE below, which is what a raw `$queryRaw` failure carries. */
+ * thrown by model-based calls like `db.user.count()` at the top-level
+ * `error.code` — distinct from the Postgres SQLSTATE above, which a raw
+ * query throws instead. Both shapes are real and independently verified;
+ * neither is a superset of the other. */
 const PRISMA_TABLE_NOT_FOUND = 'P2021';
 
 function isUndefinedTable(error: unknown): boolean {
@@ -31,12 +44,7 @@ function isUndefinedTable(error: unknown): boolean {
     return true;
   }
   const meta = (error as { meta?: { code?: unknown } }).meta;
-  if (meta && String(meta.code) === UNDEFINED_TABLE) {
-    return true;
-  }
-  return String((error as { message?: unknown }).message ?? '').includes(
-    UNDEFINED_TABLE
-  );
+  return !!meta && String(meta.code) === UNDEFINED_TABLE;
 }
 
 /**
@@ -51,6 +59,7 @@ export async function readDbState(db: PrismaClient): Promise<DbState> {
   try {
     const raw = await db.$queryRaw<RawMigrationRow[]>`
       SELECT migration_name, finished_at, rolled_back_at FROM _prisma_migrations
+      ORDER BY migration_name
     `;
     rows = raw.map(row => ({
       name: row.migration_name,
@@ -66,27 +75,22 @@ export async function readDbState(db: PrismaClient): Promise<DbState> {
 
   // A populated database is one with real content. User count is the same
   // signal `ServerService.initialized()` uses, kept deliberately so the two
-  // agree about what "pre-existing" means (grounding G7).
-  let populated = false;
+  // agree about what "pre-existing" means (grounding G7). `populated` stays
+  // `null` — undetermined, not `false` — when the table itself is missing;
+  // see the doc comment on `DbState.populated`.
+  let populated: boolean | null;
   try {
     populated = (await db.user.count()) > 0;
   } catch (error) {
     if (!isUndefinedTable(error)) {
       throw error;
     }
+    populated = null;
   }
 
   return {
     hasMigrationsTable,
     rows,
-    applied: rows
-      .filter(row => !row.rolledBackAt)
-      .map(row => row.name)
-      .sort(),
-    failed: rows
-      .filter(row => !row.finishedAt && !row.rolledBackAt)
-      .map(row => row.name)
-      .sort(),
     populated,
   };
 }

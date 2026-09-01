@@ -30,6 +30,15 @@ export type IdentityState =
   | { kind: 'match'; stamp: DeploymentStamp }
   | { kind: 'mismatch'; stamp: DeploymentStamp; configured: string };
 
+/**
+ * The comparison below is exact string equality — no trimming or other
+ * normalization. That's deliberate: this function must fail loudly on a
+ * near-miss rather than silently accept one. But it means whoever supplies
+ * `configured` owns getting it exact — a trailing newline from a
+ * mounted-secret-file value would otherwise read as a genuine `mismatch` and
+ * refuse to boot. Task 3 owns that env/secret boundary and is responsible for
+ * trimming before the value ever reaches here.
+ */
 export function evaluateIdentity(
   stamp: DeploymentStamp | null,
   configured: string | null

@@ -23,13 +23,25 @@ test('EQUAL when applied matches known', t => {
   const report = buildReport(base);
   t.is(report.verdict, 'EQUAL');
   t.deepEqual(report.pending, []);
-  t.true(report.rollbackPossible);
+  // Nothing is pending, so there is nothing to classify — this engine never
+  // examines already-applied migrations, so "rollback is possible" would be
+  // an assertion on evidence it doesn't have.
+  t.is(report.rollbackPossible, null);
 });
 
 test('UNREADABLE when the migration set is missing', t => {
   const report = buildReport({ ...base, migrations: null });
   t.is(report.verdict, 'UNREADABLE');
   t.is(report.rollbackPossible, null);
+});
+
+test('UNREADABLE outranks MIGRATION_FAILED', t => {
+  const report = buildReport({
+    ...base,
+    migrations: null,
+    appliedRows: [{ name: 'm1', finishedAt: null, rolledBackAt: null }],
+  });
+  t.is(report.verdict, 'UNREADABLE');
 });
 
 test('VIRGIN when there is no migrations table and no data', t => {
@@ -40,6 +52,29 @@ test('VIRGIN when there is no migrations table and no data', t => {
     populated: false,
   });
   t.is(report.verdict, 'VIRGIN');
+  // The fixture's m2 is `DROP TABLE`, so a fresh install would apply a
+  // BLOCKING migration on its way up — VIRGIN must report the computed
+  // answer from `pending`, not throw it away as null.
+  t.false(report.rollbackPossible);
+});
+
+test('VIRGIN still holds when population could not be determined', t => {
+  const report = buildReport({
+    ...base,
+    hasMigrationsTable: false,
+    appliedRows: [],
+    populated: null,
+  });
+  t.is(report.verdict, 'VIRGIN');
+});
+
+test('SCHEMA_INCOMPLETE when migration history exists but population could not be determined', t => {
+  const report = buildReport({
+    ...base,
+    populated: null,
+  });
+  t.is(report.verdict, 'SCHEMA_INCOMPLETE');
+  t.is(report.rollbackPossible, null);
 });
 
 test('DB_BEHIND lists pending migrations with tiers', t => {
@@ -75,6 +110,23 @@ test('an UNREADABLE pending migration fails closed, not open', t => {
   t.is(report.pending[0].tier, 'BLOCKING');
   t.is(report.pending[0].hits[0].rule, 'unreadable-migration');
   // The whole point: a migration we cannot read must never report as safe.
+  t.false(report.rollbackPossible);
+});
+
+test('a migration.sql read that throws fails closed and does not crash buildReport', t => {
+  const report = buildReport({
+    ...base,
+    migrations: {
+      ...base.migrations!,
+      sql: () => {
+        throw new Error('EACCES: permission denied');
+      },
+    },
+    appliedRows: [{ name: 'm1', finishedAt: new Date(), rolledBackAt: null }],
+  });
+  t.is(report.verdict, 'DB_BEHIND');
+  t.is(report.pending[0].tier, 'BLOCKING');
+  t.is(report.pending[0].hits[0].rule, 'unreadable-migration');
   t.false(report.rollbackPossible);
 });
 
