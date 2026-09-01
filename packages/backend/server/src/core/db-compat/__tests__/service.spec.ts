@@ -3,7 +3,7 @@ import test from 'ava';
 
 import type { CompatReport } from '../compat';
 import { DEPLOYMENT_STAMP_ID, readStamp, writeStamp } from '../identity';
-import { DbCompatService,decide } from '../service';
+import { DbCompatService, decide } from '../service';
 
 // `rollbackPossible: null` for EQUAL is the real contract (D16): the engine
 // classifies only PENDING migrations, so it has no basis to claim rollback
