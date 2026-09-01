@@ -11,11 +11,12 @@
 //
 // getDefaultConfig() validates defaults and env, but CONFIG_JSON_PATHS overrides
 // (~/.affine/config/config.json, the primary self-host mechanism) and ConfigFactory.override
-// are NOT validated. A fractional OR non-numeric value (e.g. "100GB", "1,000", null) can
-// therefore reach applyWovenSelfhostQuota; the real guarantee this file provides is that such a
-// value fails closed to the resolved plan value — via usableFloor() below — rather than
-// propagating NaN into Math.max()/BigInt(...) in state.ts, not schema validation at every entry
-// point.
+// are NOT validated. A fractional, non-numeric, OR out-of-range value (e.g. "100GB", "1,000",
+// null, 5000000000) can therefore reach applyWovenSelfhostQuota; the real guarantee this file
+// provides is that such a value fails closed to the resolved plan value — via usableFloor()
+// below, bounded by WOVEN_LIMIT_MAX — rather than propagating NaN into Math.max()/BigInt(...) in
+// state.ts, or a magnitude that overflows the destination column, not schema validation at every
+// entry point.
 import { z } from 'zod';
 
 import { defineModuleConfig } from '../../base';
@@ -34,6 +35,23 @@ declare global {
 
 const INHERIT = -1;
 
+const INT32_MAX = 2147483647;
+
+// Single source of truth for the per-key ceiling, read by BOTH the boot-time zod validation
+// (WOVEN_LIMIT_SHAPES below) and the runtime guard (usableFloor) that CONFIG_JSON_PATHS
+// overrides and ConfigFactory.override must pass through unvalidated. A bound defined in two
+// places drifts; a bound defined once and read twice provably cannot disagree.
+export const WOVEN_LIMIT_MAX = {
+  // seat_limit is `Int @db.Integer` (int4) in schema.prisma and is read as i32 by the native
+  // invite-abuse policy, so the seat floor cannot exceed int4.
+  selfhostSeatLimit: INT32_MAX,
+  // storage_quota / blob_limit are `BigInt @db.BigInt`, but the value passes through a JS
+  // number and `BigInt(...)` in state.ts, so MAX_SAFE_INTEGER — not the int8 range — is the
+  // real ceiling. Widening this would admit a config value that silently changes en route.
+  selfhostStorageQuota: Number.MAX_SAFE_INTEGER,
+  selfhostBlobLimit: Number.MAX_SAFE_INTEGER,
+} as const;
+
 function limitShape(max: number) {
   return z
     .number()
@@ -45,17 +63,10 @@ function limitShape(max: number) {
     });
 }
 
-const INT32_MAX = 2147483647;
-
 export const WOVEN_LIMIT_SHAPES = {
-  // seat_limit is `Int @db.Integer` (int4) in schema.prisma and is read as i32 by the native
-  // invite-abuse policy, so the seat floor cannot exceed int4.
-  selfhostSeatLimit: limitShape(INT32_MAX),
-  // storage_quota / blob_limit are `BigInt @db.BigInt`, but the value passes through a JS
-  // number and `BigInt(...)` in state.ts, so MAX_SAFE_INTEGER — not the int8 range — is the
-  // real ceiling. Widening this would admit a config value that silently changes en route.
-  selfhostStorageQuota: limitShape(Number.MAX_SAFE_INTEGER),
-  selfhostBlobLimit: limitShape(Number.MAX_SAFE_INTEGER),
+  selfhostSeatLimit: limitShape(WOVEN_LIMIT_MAX.selfhostSeatLimit),
+  selfhostStorageQuota: limitShape(WOVEN_LIMIT_MAX.selfhostStorageQuota),
+  selfhostBlobLimit: limitShape(WOVEN_LIMIT_MAX.selfhostBlobLimit),
 };
 
 defineModuleConfig('woven', {
@@ -86,24 +97,34 @@ type Floorable = {
 };
 
 // configured is coerced and range-checked at this trust boundary: CONFIG_JSON_PATHS overrides
-// and ConfigFactory.override are not schema-validated, so a fractional or non-numeric override
-// (a typo'd byte count, "100GB", "1,000", null, undefined, NaN, Infinity) must not reach
-// BigInt(...) in state.ts and throw RangeError on every reconcile, and must not reach a Prisma
-// int4 write and throw there either. Fail closed to the plan value: a floor we cannot make sense
-// of must never become NaN. INHERIT (-1) collapses to the same "leave resolved alone" outcome as
-// any other unusable value, since -1 < 1 — no separate INHERIT check is needed.
-function usableFloor(configured: unknown): number | null {
+// and ConfigFactory.override are not schema-validated, so a fractional, non-numeric, or
+// out-of-range override (a typo'd byte count, "100GB", "1,000", null, undefined, NaN, Infinity,
+// 5000000000 for a seat floor, "9007199254740993") must not reach BigInt(...) in state.ts and
+// throw RangeError on every reconcile, must not reach a Prisma int4 write and throw there
+// either, and must not silently change value en route (Number.isSafeInteger, not isFinite,
+// rejects magnitudes that lose precision passing through a JS number). Fail closed to the plan
+// value: a floor we cannot make sense of, or that would not fit the column it is destined for,
+// must never reach Math.max(). INHERIT (-1) collapses to the same "leave resolved alone" outcome
+// as any other unusable value, since -1 < 1 — no separate INHERIT check is needed. `max` is
+// always one of WOVEN_LIMIT_MAX's values, the same bound the zod shape enforces at boot.
+function usableFloor(configured: unknown, max: number): number | null {
   const floor = Math.trunc(Number(configured));
-  return Number.isFinite(floor) && floor >= 1 ? floor : null;
+  return Number.isSafeInteger(floor) && floor >= 1 && floor <= max
+    ? floor
+    : null;
 }
 
-function floorMaybeAbsent(resolved: number | undefined, configured: unknown) {
-  const floor = usableFloor(configured);
+function floorMaybeAbsent(
+  resolved: number | undefined,
+  configured: unknown,
+  max: number
+) {
+  const floor = usableFloor(configured, max);
   return floor === null ? resolved : Math.max(resolved ?? 0, floor);
 }
 
-function floorPresent(resolved: number, configured: unknown) {
-  const floor = usableFloor(configured);
+function floorPresent(resolved: number, configured: unknown, max: number) {
+  const floor = usableFloor(configured, max);
   return floor === null ? resolved : Math.max(resolved, floor);
 }
 
@@ -125,12 +146,24 @@ export function applyWovenSelfhostQuota<T extends Floorable>(
     return quota;
   }
 
-  const seatLimit = floorMaybeAbsent(quota.seatLimit, floors.selfhostSeatLimit);
+  const seatLimit = floorMaybeAbsent(
+    quota.seatLimit,
+    floors.selfhostSeatLimit,
+    WOVEN_LIMIT_MAX.selfhostSeatLimit
+  );
 
   return {
     ...quota,
-    storageQuota: floorPresent(quota.storageQuota, floors.selfhostStorageQuota),
-    blobLimit: floorPresent(quota.blobLimit, floors.selfhostBlobLimit),
+    storageQuota: floorPresent(
+      quota.storageQuota,
+      floors.selfhostStorageQuota,
+      WOVEN_LIMIT_MAX.selfhostStorageQuota
+    ),
+    blobLimit: floorPresent(
+      quota.blobLimit,
+      floors.selfhostBlobLimit,
+      WOVEN_LIMIT_MAX.selfhostBlobLimit
+    ),
     // Conditionally spread rather than always assigning `seatLimit: seatLimit`, so an
     // undefined result never materializes the key — `{ ...quota, seatLimit: undefined }`
     // would add an own enumerable property that upstream never produces.
