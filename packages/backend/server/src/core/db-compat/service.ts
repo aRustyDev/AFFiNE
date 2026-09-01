@@ -25,6 +25,18 @@ export interface CompatDecision {
   refusal: string | null;
   /** The adoption to record, or null when nothing needs recording. */
   adopt: AdoptionMode | null;
+  /**
+   * True only when `ok: false` for `UNREADABLE`. The predeploy gate
+   * (`db check`) still refuses to proceed — a packaging fault is not
+   * something a mutating command should charge past — but design D9 requires
+   * the BOOT guard to log and continue rather than take the whole fleet down
+   * over what might be a packaging fault rather than a genuine compatibility
+   * problem. Every other refusal (a REFUSING_VERDICTS verdict, or the
+   * BLOCKING-pending-without-flag refusal) means `false`: the boot guard
+   * must not continue past those. Callers should read this field rather than
+   * re-deriving the asymmetry from `report.verdict` themselves.
+   */
+  bootMayContinue: boolean;
 }
 
 /**
@@ -38,24 +50,57 @@ export function decide(
   const verdict: Verdict = report.verdict;
 
   if (REFUSING_VERDICTS.has(verdict)) {
-    return { report, ok: false, refusal: report.reason, adopt: null };
+    return {
+      report,
+      ok: false,
+      refusal: report.reason,
+      adopt: null,
+      bootMayContinue: false,
+    };
   }
 
   // UNREADABLE is deliberately NOT in REFUSING_VERDICTS: the predeploy gate
   // refuses on it (below), but the boot guard logs and continues (design D9),
   // because refusing to boot over a packaging fault would take the fleet down
-  // for a non-safety reason. `guard.ts` in Task 5 applies that asymmetry.
+  // for a non-safety reason. `guard.ts` in Task 5 reads `bootMayContinue`
+  // rather than re-deriving this from `report.verdict` itself.
   if (verdict === 'UNREADABLE') {
-    return { report, ok: false, refusal: report.reason, adopt: null };
+    return {
+      report,
+      ok: false,
+      refusal: report.reason,
+      adopt: null,
+      bootMayContinue: true,
+    };
   }
 
   const alreadyStamped = report.identity.kind !== 'absent';
   if (alreadyStamped) {
-    return { report, ok: true, refusal: null, adopt: null };
+    return {
+      report,
+      ok: true,
+      refusal: null,
+      adopt: null,
+      bootMayContinue: true,
+    };
   }
 
-  if (verdict === 'VIRGIN') {
-    return { report, ok: true, refusal: null, adopt: 'fresh-install' };
+  // Unstamped and with no data: a fresh install, whether or not the schema
+  // has been fully migrated yet. `VIRGIN` covers "before `prisma migrate
+  // deploy`"; `populated: false` on an otherwise EQUAL/DB_BEHIND report
+  // covers "after migrate but before anyone has signed up" — exactly the
+  // state `db stamp` runs in right after a brand-new deployment's first
+  // migration pass. Neither should ever be logged as "adopting a
+  // pre-existing database": there is nothing to adopt, and nothing pending
+  // to protect against.
+  if (verdict === 'VIRGIN' || report.populated === false) {
+    return {
+      report,
+      ok: true,
+      refusal: null,
+      adopt: 'fresh-install',
+      bootMayContinue: true,
+    };
   }
 
   // Unstamped and populated: this is the adoption decision (design D3).
@@ -70,6 +115,7 @@ export function decide(
         `impossible. Confirm with AFFINE_DB_ADOPT=1 (or --adopt) once a VERIFIED-RESTORABLE ` +
         `backup exists.`,
       adopt: null,
+      bootMayContinue: false,
     };
   }
 
@@ -78,6 +124,7 @@ export function decide(
     ok: true,
     refusal: null,
     adopt: options.adopt ? 'explicit' : 'implicit',
+    bootMayContinue: true,
   };
 }
 
@@ -87,10 +134,16 @@ export class DbCompatService {
 
   constructor(private readonly db: PrismaClient) {}
 
+  /**
+   * Assembles a compatibility report. Never throws on a missing
+   * `app_configs` table — that is the normal state of a fresh install before
+   * `prisma migrate deploy` has run, and `readStamp` degrades it to "no
+   * stamp" (see `identity.ts`).
+   */
   async report(): Promise<CompatReport> {
     const migrations = loadMigrationSet();
     const state = await readDbState(this.db);
-    const stamp = await readStamp(this.db);
+    const { stamp, corrupt } = await readStamp(this.db);
 
     return buildReport({
       migrations,
@@ -98,28 +151,73 @@ export class DbCompatService {
       appliedRows: state.rows,
       populated: state.populated,
       stamp,
+      stampCorrupt: corrupt,
       configuredDeploymentId: configuredDeploymentId(),
     });
   }
 
   /**
-   * Classify, and when `mutate` is set, record the adoption decision.
-   * `mutate: false` is the read-only boot path.
+   * Classify and decide. Writes nothing — this is the predeploy gate
+   * (`db check`), which must be able to refuse BEFORE anything mutates,
+   * including before `prisma migrate deploy` has even run and `app_configs`
+   * necessarily exists yet.
+   *
+   * New predeploy order:
+   *   fixFailedMigrations() → db check (this method; refuses up front)
+   *                         → prisma migrate deploy → data migrations
+   *                         → db stamp (`stamp()`; app_configs now exists)
    */
-  async check(options: {
-    mutate: boolean;
-    adopt?: boolean;
-  }): Promise<CompatDecision> {
+  async check(options: { adopt?: boolean } = {}): Promise<CompatDecision> {
     const report = await this.report();
-    const decision = decide(report, {
-      adopt: options.adopt ?? adoptRequested(),
+    return decide(report, {
+      adopt: options.adopt === true || adoptRequested(),
     });
+  }
 
-    if (decision.ok && decision.adopt && options.mutate) {
-      await this.recordAdoption(decision.adopt);
+  /**
+   * Records the adoption decision. Idempotent, and intended to run AFTER
+   * migrations, once `app_configs` is guaranteed to exist:
+   *
+   * - No stamp yet: records the adoption `check()` would decide (fresh
+   *   install, implicit, or explicit).
+   * - Already stamped: updates ONLY `lastMigratedBy` — `adoptedAt` and
+   *   `adoptionMode` describe the ORIGINAL adoption and must never be
+   *   overwritten by a later migration run.
+   * - Current verdict refuses (e.g. `IDENTITY_MISMATCH`, a corrupt stamp, a
+   *   BLOCKING migration without the flag): does not stamp. Logs and
+   *   returns — by the time this runs, migrations may already have applied,
+   *   so there is no meaningful "abort" left to perform here; the refusal
+   *   that matters is the one `check()` raised before migrations ran.
+   */
+  async stamp(): Promise<void> {
+    const report = await this.report();
+    const decision = decide(report, { adopt: adoptRequested() });
+
+    if (!decision.ok) {
+      this.logger.error(
+        `refusing to record deployment stamp: ${decision.refusal}`
+      );
+      return;
     }
 
-    return decision;
+    if (
+      report.identity.kind === 'unchecked' ||
+      report.identity.kind === 'match'
+    ) {
+      await this.touchLastMigratedBy(report.identity.stamp);
+      return;
+    }
+
+    if (decision.adopt) {
+      await this.recordAdoption(decision.adopt);
+    }
+  }
+
+  private async touchLastMigratedBy(stamp: DeploymentStamp): Promise<void> {
+    await writeStamp(this.db, {
+      ...stamp,
+      lastMigratedBy: { ...buildRef(), at: new Date().toISOString() },
+    });
   }
 
   private async recordAdoption(mode: AdoptionMode): Promise<void> {
