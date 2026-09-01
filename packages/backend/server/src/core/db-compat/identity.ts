@@ -1,3 +1,5 @@
+import { type Prisma, type PrismaClient } from '@prisma/client';
+
 /**
  * `app_configs` id for the deployment stamp.
  *
@@ -52,4 +54,39 @@ export function evaluateIdentity(
   return stamp.deploymentId === configured
     ? { kind: 'match', stamp }
     : { kind: 'mismatch', stamp, configured };
+}
+
+function parseStamp(value: unknown): DeploymentStamp | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const candidate = value as Partial<DeploymentStamp>;
+  if (typeof candidate.deploymentId !== 'string' || !candidate.deploymentId) {
+    return null;
+  }
+  if (typeof candidate.adoptedAt !== 'string') {
+    return null;
+  }
+  return candidate as DeploymentStamp;
+}
+
+export async function readStamp(
+  db: PrismaClient
+): Promise<DeploymentStamp | null> {
+  const row = await db.appConfig.findUnique({
+    where: { id: DEPLOYMENT_STAMP_ID },
+  });
+  return row ? parseStamp(row.value) : null;
+}
+
+export async function writeStamp(
+  db: PrismaClient,
+  stamp: DeploymentStamp
+): Promise<void> {
+  const value = stamp as unknown as Prisma.InputJsonValue;
+  await db.appConfig.upsert({
+    where: { id: DEPLOYMENT_STAMP_ID },
+    update: { value },
+    create: { id: DEPLOYMENT_STAMP_ID, value },
+  });
 }
