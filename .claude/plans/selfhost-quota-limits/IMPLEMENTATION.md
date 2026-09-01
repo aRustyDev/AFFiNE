@@ -11,9 +11,10 @@ defaulting to byte-identical upstream behavior.
 **Architecture:** All three values originate in the Rust plan catalog's `selfhost_free` arm and
 reach every enforcement point through one projection written by `QuotaStateService`. A pure
 fork-owned helper floors them, applied at the two `reconcile*QuotaStateNow` sites in
-`state.ts`. That is the only upstream-owned file touched; the frontend, all four server-side
-seat checks, the readonly computation, and the blob upload checks all follow from the projection
-with no further edits.
+`state.ts`. That is the only **hand-edited** upstream-owned file; the frontend, all four
+server-side seat checks, the readonly computation, and the blob upload checks all follow from the
+projection with no further edits. Two _generated_ upstream-owned artifacts also change, because
+registering a config module makes `genconfig` rewrite them — see the File Structure table.
 
 **Tech Stack:** TypeScript, NestJS, Prisma, AVA (`--concurrency 1 --serial`), zod for config
 validation, `defineModuleConfig` from `src/base`.
@@ -1295,7 +1296,7 @@ gh pr create --repo aRustyDev/AFFiNE --base woven/main --fill
 - [ ] **Step 5: Close the bead**
 
 ```bash
-bd close affine-vap --reason "DELIVERED. <PR link>, merged as <sha>. Three configurable self-host quota floors (seat/storage/blob) at the QuotaStateService seam; one upstream-owned file with a manifest row; outbound guard confirmed to refuse the branch (exit 1). auth.inviteQuotaShadowMode set in deploy config per D8. Unblocks affine-tfd."
+bd close affine-vap --reason "DELIVERED. <PR link>, merged as <sha>. Three configurable self-host quota floors (seat/storage/blob) at the QuotaStateService seam. One hand-edited upstream-owned file (core/quota/state.ts, 4 marked regions) plus two generated config artifacts; three manifest rows. Outbound leak guard confirmed to NAME core/quota/state.ts in its LEAKED list -- its exit code proves nothing on this fork, since oidc.ts is a pre-existing core patch that makes --outbound exit 1 on any branch. auth.inviteQuotaShadowMode set in deploy config per D8. Unblocks affine-tfd."
 ```
 
 Do **not** run `bd dolt push` — the shared Dolt server has no GitHub remote.

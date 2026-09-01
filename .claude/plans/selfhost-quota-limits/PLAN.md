@@ -3,8 +3,8 @@
 > **FORK-LOCAL CORE PATCH. MUST NEVER appear in an upstream-directed PR.** Per `affine-cm9`
 > (fork strategy) and `scripts/woven-agent-bootstrap.md` §0, which names the member/seat-limit
 > removal (`affine-vap`) as the fork's canonical never-upstream patch.
-> Status: **IN PROGRESS — grounded 2026-09-01 against HEAD `c6fc3b2dec`. Tasks 0–2 done
-> (`IMPLEMENTATION.md` carries the as-built notes); Tasks 3–6 remain.**
+> Status: **IN PROGRESS — grounded 2026-09-01 against HEAD `c6fc3b2dec`. Tasks 0–5 done
+> (`IMPLEMENTATION.md` carries the as-built notes); Task 6 (deploy config + PR) remains.**
 > Beads: `affine-vap` (this plan). Mode B — a self-minted self-host Team license — is split
 > out as its own bead depending on `affine-vap`; its research is preserved here in
 > [findings/mode-b-license-format.md](findings/mode-b-license-format.md).
