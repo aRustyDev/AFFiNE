@@ -1945,16 +1945,26 @@ export class DbCompatService {
 }
 ```
 
-Create `packages/backend/server/src/core/db-compat/index.ts`:
+Create `packages/backend/server/src/core/db-compat/index.ts`.
+
+**Grow this file incrementally — do not stub what does not exist yet.** `render.ts` arrives in
+Task 4 and `guard.ts` in Task 5; each adds its own export then. Creating empty stubs and commenting
+out imports would leave dead code in the tree between tasks, and commented-out code is the kind of
+thing that survives by accident.
 
 ```ts
 import { Module } from '@nestjs/common';
 
-import { DbCompatGuard } from './guard';
 import { DbCompatService } from './service';
 
 /**
  * Service only — safe to import anywhere, including the minimal CLI context.
+ *
+ * The boot guard deliberately lives in a SEPARATE module added in Task 5
+ * (`DbCompatGuardModule`), which only `AppModule` may import. See design
+ * D10/D14: the CLI imports `FunctionalityModules`, so a guard reachable from
+ * there would make `db check` refuse to run in exactly the situation it exists
+ * for.
  */
 @Module({
   providers: [DbCompatService],
@@ -1962,38 +1972,10 @@ import { DbCompatService } from './service';
 })
 export class DbCompatModule {}
 
-/**
- * Adds the boot guard. ONLY `AppModule` may import this (design D10/D14): the
- * CLI imports `FunctionalityModules`, and a guard reachable from there would
- * make `db check` refuse to run in exactly the situation it exists for.
- */
-@Module({
-  imports: [DbCompatModule],
-  providers: [DbCompatGuard],
-})
-export class DbCompatGuardModule {}
-
 export { classifyDdl, type DdlTier } from './classify';
 export { type CompatReport, type Verdict } from './compat';
-export { renderReport } from './render';
 export { type CompatDecision, DbCompatService } from './service';
 ```
-
-`guard.ts` and `render.ts` do not exist yet, so `index.ts` will not compile until Task 4 (render)
-and Task 5 (guard). Create the two files as one-line stubs now so the module graph resolves, and
-fill them in their own tasks:
-
-```bash
-printf 'export {};\n' > packages/backend/server/src/core/db-compat/render.ts
-```
-
-```bash
-printf 'export {};\n' > packages/backend/server/src/core/db-compat/guard.ts
-```
-
-Then temporarily comment out the `DbCompatGuard` import, the `DbCompatGuardModule` class and the
-`renderReport` re-export in `index.ts`, with a `// TODO(affine-tc6.4/.5)` marker on each. Task 4
-Step 8 restores the render export; Task 5 Step 4 restores the guard.
 
 - [ ] **Step 9: Run to verify pass**
 
@@ -2013,7 +1995,7 @@ git add packages/backend/server/src/core/db-compat/ && git commit -m "feat(woven
 
 **Files:**
 
-- Create: `packages/backend/server/src/core/db-compat/render.ts` (replacing the stub)
+- Create: `packages/backend/server/src/core/db-compat/render.ts`
 - Modify: `packages/backend/server/src/cli.ts`
 - Modify: `scripts/woven-patch-manifest.md` (first row)
 
@@ -2136,11 +2118,11 @@ test('a long statement is excerpted and says how much was dropped', t => {
 
 Run: `yarn affine @affine/server test src/core/db-compat/__tests__/render.spec.ts`
 
-Expected: FAIL — `renderReport` is not exported (the file is still the `export {}` stub).
+Expected: FAIL — unresolved import of `../render` (the file does not exist yet).
 
 - [ ] **Step 3: Implement `render.ts`**
 
-Replace `packages/backend/server/src/core/db-compat/render.ts` entirely:
+Create `packages/backend/server/src/core/db-compat/render.ts`:
 
 ```ts
 import type { CompatReport } from './compat';
@@ -2243,9 +2225,9 @@ Run: `yarn affine @affine/server test src/core/db-compat/__tests__/render.spec.t
 
 Expected: PASS, 6 tests.
 
-- [ ] **Step 5: Restore the `renderReport` re-export in `index.ts`**
+- [ ] **Step 5: Add the `renderReport` export to `index.ts`**
 
-Remove the `// TODO(affine-tc6.4/.5)` comment from the `renderReport` line so it reads:
+`index.ts` grows one export per task; nothing was stubbed. Append:
 
 ```ts
 export { renderReport } from './render';
@@ -2411,7 +2393,7 @@ git add packages/backend/server/src/core/db-compat/ packages/backend/server/src/
 
 **Files:**
 
-- Create: `packages/backend/server/src/core/db-compat/guard.ts` (replacing the stub)
+- Create: `packages/backend/server/src/core/db-compat/guard.ts`
 - Modify: `packages/backend/server/src/app.module.ts`
 - Modify: `packages/backend/server/scripts/self-host-predeploy.js`
 - Modify: `scripts/woven-patch-manifest.md` (two more rows)
@@ -2487,11 +2469,11 @@ test('the bypass suppresses the throw and logs at ERROR every time', t => {
 
 Run: `yarn affine @affine/server test src/core/db-compat/__tests__/guard.spec.ts`
 
-Expected: FAIL — `enforce` is not exported (the file is still the `export {}` stub).
+Expected: FAIL — unresolved import of `../guard` (the file does not exist yet).
 
 - [ ] **Step 3: Implement `guard.ts`**
 
-Replace `packages/backend/server/src/core/db-compat/guard.ts` entirely:
+Create `packages/backend/server/src/core/db-compat/guard.ts`:
 
 ```ts
 import {
@@ -2574,10 +2556,25 @@ export class DbCompatGuard implements OnApplicationBootstrap {
 }
 ```
 
-- [ ] **Step 4: Restore the guard exports in `index.ts`**
+- [ ] **Step 4: Add `DbCompatGuardModule` to `index.ts`**
 
-Remove the `// TODO(affine-tc6.4/.5)` markers so the `DbCompatGuard` import and the
-`DbCompatGuardModule` class are active again, exactly as written in Task 3 Step 8.
+`index.ts` grows one addition per task; nothing was stubbed. Add the import and the second module
+alongside the existing `DbCompatModule`:
+
+```ts
+import { DbCompatGuard } from './guard';
+
+/**
+ * Adds the boot guard. ONLY `AppModule` may import this (design D10/D14): the
+ * CLI imports `FunctionalityModules`, and a guard reachable from there would
+ * make `db check` refuse to run in exactly the situation it exists for.
+ */
+@Module({
+  imports: [DbCompatModule],
+  providers: [DbCompatGuard],
+})
+export class DbCompatGuardModule {}
+```
 
 - [ ] **Step 5: Run to verify pass**
 
