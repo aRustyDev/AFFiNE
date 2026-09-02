@@ -436,27 +436,53 @@ while IFS=$'\t' read -r p c s d; do
   esac
 done <<< "$CLASSIFIED"
 
+# ---- accumulate a single "inbound is unclean" signal -----------------------
+# Every one of the five verdicts above is a way the manifest-row-to-tree
+# correspondence can be broken: UNMANIFESTED (no row at all), STALE, RESURRECTED,
+# OBSOLETE, MOVED_GONE. Outbound (below) must refuse to judge unless ALL FIVE
+# are clean — not just the two that existed before affine-83p. Rather than have
+# the outbound gate re-enumerate five names (the second enumeration is exactly
+# what let affine-83p ship a gate that checked only two of them — see the
+# OUTBOUND comment below), every verdict OR's into one flag here, and outbound
+# consults only the flag. A verdict this guard grows in the future only has to
+# set INBOUND_UNCLEAN=1 in this block; there is no second site left to forget.
+#
+# UNDIVERGED is deliberately excluded and always will be: a row for a file that
+# no longer differs from the baseline cannot hide a patch (affine-hn1.4), so it
+# stays a warning on both sides, never a gate.
+INBOUND_UNCLEAN=0
+[ -n "$UNMANIFESTED" ] && INBOUND_UNCLEAN=1
+[ -n "$STALE" ]        && INBOUND_UNCLEAN=1
+[ -n "$RESURRECTED" ]  && INBOUND_UNCLEAN=1
+[ -n "$OBSOLETE" ]     && INBOUND_UNCLEAN=1
+[ -n "$MOVED_GONE" ]   && INBOUND_UNCLEAN=1
+
 # ---- OUTBOUND mode: don't leak a fork patch to upstream --------------------
 # Asks an ADDITIONAL question to the inbound one, over the same inputs: not just
 # "is this divergence declared?" but "is this change set carrying something
-# marked NEVER-upstream?". Runs after BOTH inbound checks — UNMANIFESTED and
-# STALE — rather than just the first: outbound requires the branch to be
-# INBOUND-CLEAN, not merely unmanifested-clean. A stale row's category no
-# longer describes this tree either — for example a rename (CHANGED above is
-# taken with --no-renames precisely so a rename cannot hide the old path from
-# this diff) leaves the manifested path absent from the tree, and the row's
-# classification becomes unverifiable — the same "absence is ambiguous" shape
+# marked NEVER-upstream?". Runs only once INBOUND_UNCLEAN is 0 — outbound
+# requires the branch to be INBOUND-CLEAN on EVERY inbound verdict, not merely
+# unmanifested-clean. A row whose meaning the tree can no longer confirm —
+# stale, resurrected, obsolete, or a MOVED destination that doesn't resolve —
+# leaves its classification unverifiable, the same "absence is ambiguous" shape
 # the unmanifested check exists to close on the other side.
 #
-# FORKLOCAL is derived from the manifest, so a row the parser cannot read
-# silently leaves the set, and an empty set looks exactly like "nothing to
-# leak". An unreadable or stale row makes gating here fail closed by
-# construction rather than by having been anticipated. It also means the
-# checks can never disagree: a branch cannot be "safe to send upstream" while
-# carrying a divergence the fork has not declared, or a row whose meaning this
-# tree can no longer confirm.
+# FORKLOCAL is derived from the manifest, so a row the parser cannot read, or
+# whose tree correspondence has broken some other way, silently leaves the
+# set — and an empty set looks exactly like "nothing to leak". Gating on
+# INBOUND_UNCLEAN makes that fail closed by construction rather than by
+# anticipation: see .claude/plans/upstream-leak-guard/DESIGN.md, "Outbound is
+# an ADDITIONAL question, not a separate one", whose whole point is to refuse
+# enumerating failure modes so a NEW one fails closed automatically. affine-83p
+# added three new modes (RESURRECTED, OBSOLETE, MOVED_GONE) and, for one
+# commit, left this gate consulting only the original two (UNMANIFESTED,
+# STALE) — a MOVED row whose declared destination didn't match where the
+# FORK-LOCAL content actually landed reached rc 0 "safe to send upstream" here
+# while inbound correctly reported MOVED_GONE. The two directions disagreed,
+# which is supposed to be impossible: gating on the single accumulated flag
+# instead of naming checks here is the fix, not a patch over that one path.
 if [ "$OUTBOUND" -eq 1 ]; then
-  if [ -n "$UNMANIFESTED" ] || [ -n "$STALE" ]; then
+  if [ "$INBOUND_UNCLEAN" -eq 1 ]; then
     if [ -n "$UNMANIFESTED" ]; then
       err "cannot judge this change set: upstream-owned file(s) with no manifest row:"
       while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$UNMANIFESTED"
@@ -474,6 +500,27 @@ if [ "$OUTBOUND" -eq 1 ]; then
       err "  path is still upstream-owned and dropping the row only trades this failure"
       err "  for UNMANIFESTED. If THIS BRANCH deleted it instead, set the row's State to"
       err "  REMOVED (or MOVED \`new/path\`) and run again."
+    fi
+    if [ -n "$RESURRECTED" ]; then
+      err "cannot judge this change set: manifest row(s) marked removed or moved, but the path is present:"
+      while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$RESURRECTED"
+      err ""
+      err "  A RESURRECTED row's category no longer describes this tree until it is"
+      err "  resolved — delete the file again, or clear the State cell back to empty."
+    fi
+    if [ -n "$OBSOLETE" ]; then
+      err "cannot judge this change set: manifest row(s) marked removed or moved, but absent from the baseline too:"
+      while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$OBSOLETE"
+      err ""
+      err "  An OBSOLETE row no longer describes any divergence. Drop the row."
+    fi
+    if [ -n "$MOVED_GONE" ]; then
+      err "cannot judge this change set: MOVED row(s) whose destination is not in the tree:"
+      while IFS= read -r l; do [ -n "$l" ] && err "    $l"; done <<< "$MOVED_GONE"
+      err ""
+      err "  Until the destination resolves, clause 3 cannot confirm the FORK-LOCAL patch"
+      err "  is actually there. Point State at the path the file actually has now, or use"
+      err "  REMOVED if the fork dropped it rather than relocating it."
     fi
     exit 1
   fi

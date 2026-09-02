@@ -560,21 +560,36 @@ fi
 
 # --- 27. the realistic exploit shape: an upstream-directed branch built ------
 #         FROM the baseline that only ADDS the relocated FORK-LOCAL file ------
-# Fixture 26 renames on top of the current branch, so the SOURCE path's own
-# absence is enough on its own to trip outbound (LEAKED catches it via the
-# source, same as fixture 16's rename-hiding case) -- rc 1 there does not by
-# itself prove clause 3 is doing anything; only its expect_names on the
-# destination does. This fixture is the shape a reviewer actually used to
+# Fixture 26 renames on top of the current branch (git mv, so the source is
+# genuinely GONE from the resulting tree) -- that isolates clause 3 cleanly,
+# which is why fixture 26 is the one mutation-tested against clause 3 alone.
+# This fixture instead reproduces the shape a reviewer actually used to
 # demonstrate the leak end to end: a branch cut FROM the upstream baseline --
 # the shape scripts/woven-upstream-branch.sh builds, same as fixture 17 -- that
 # never touches the source path at all. It only ADDS the fork-local file's
-# CONTENT at its NEW, fork-owned address. The source path is therefore
-# byte-identical to the baseline and never appears in CHANGED, so
-# UPSTREAM_OWNED is 0 -- and pre-clause-3, LEAKED (comm -12 CHANGED FORKLOCAL)
-# is empty too, so the guard printed "no FORK-LOCAL CORE PATCH ... safe to
-# send upstream" at rc 0: a full, undegraded pass. Built with plumbing against
-# a scratch index seeded from the baseline, exactly like fixture 17, so no
-# branch, index or working tree is touched -- no git-mv, so none of the
+# CONTENT at its NEW, fork-owned address, so the source path stays
+# byte-identical to the baseline and never appears in CHANGED: UPSTREAM_OWNED
+# is 0, and originally -- before the outbound pre-gate was extended to consult
+# every inbound verdict, not just UNMANIFESTED/STALE (see the INBOUND_UNCLEAN
+# comment above OUTBOUND mode) -- LEAKED (comm -12 CHANGED FORKLOCAL) was empty
+# too, so the guard printed "no FORK-LOCAL CORE PATCH ... safe to send
+# upstream" at rc 0: a full, undegraded pass.
+#
+# A DIRECT CONSEQUENCE OF THAT SAME FIX: this shape's source path is left
+# untouched -- present, byte-identical to baseline -- and RESURRECTED checks
+# presence, not content, so a MOVED row whose source is merely left alone (as
+# it always will be in this exact shape) now trips RESURRECTED before LEAKED
+# ever runs. That is correct and desirable: from presence alone the guard
+# cannot tell an untouched baseline copy from the fork's own patch sitting
+# where the row says it shouldn't. But it means this fixture no longer
+# isolates clause 3 the way it did when first written -- rc 1 now comes from
+# RESURRECTED, not from LEAKED naming the destination. Fixture 26 carries the
+# clause-3-isolation burden now (see its own mutation test); this fixture's
+# job is narrower -- pin that the realistic add-only shape stays blocked, by
+# WHATEVER inbound verdict catches it, and that the block is a refusal to
+# judge, not a leak verdict standing in by coincidence. Built with plumbing
+# against a scratch index seeded from the baseline, exactly like fixture 17,
+# so no branch, index or working tree is touched -- no git-mv, so none of the
 # stranded-tree hazard fixtures 23-26 have to guard against.
 echo "-- outbound: an upstream-baseline branch that only ADDS the relocated FORK-LOCAL file"
 mark_moved "$OIDC_PATH" "$MOVED_DEST" "$TMPDIR_T/m-moved-addonly.md"
@@ -594,7 +609,14 @@ if [ -z "$ADDONLY_REF" ]; then
 else
   run_guard --outbound --base "$OB_BASE" --head "$ADDONLY_REF" --manifest "$TMPDIR_T/m-moved-addonly.md"
   expect_rc 1 "policy violation"
-  expect_names "$MOVED_DEST"
+  # RESURRECTED fires here (source present, MOVED declared -- see the comment
+  # above), so the refusal names the SOURCE path, not the destination.
+  expect_names "$OIDC_PATH"
+  if grep -qF -- "cannot judge this change set" "$OUT"; then
+    ok "blocked by a refusal to judge, not a leak verdict"
+  else
+    bad "expected a pre-gate refusal to judge, not whatever this is"; dump
+  fi
 
   # Pin the SHAPE, not just the outcome: this must be the degenerate
   # "0 upstream-owned" case the reviewer demonstrated, not some other reason
@@ -604,6 +626,60 @@ else
     ok "fixture commit really is baseline + one fork-owned addition (0 upstream-owned)"
   else
     bad "fixture commit does not match the intended add-only shape"; dump
+  fi
+fi
+
+# --- 28. the reviewer's exploit: a MOVED destination that does not match -----
+#         where the FORK-LOCAL content actually landed ------------------------
+# The defect a code review found in the affine-83p follow-up: outbound's
+# pre-gate consulted UNMANIFESTED and STALE, but never MOVED_GONE (or
+# RESURRECTED, or OBSOLETE). So a MOVED row whose declared destination is
+# wrong -- a typo, a stale edit, a row nobody re-verified after the file
+# actually landed -- let clause 3 add the DECLARED (wrong) path to FORKLOCAL.
+# That path is not in CHANGED (nothing was ever written there), so LEAKED came
+# out empty and outbound printed "safe to send upstream" at rc 0 while the
+# patch was fully present under its REAL name. Inbound, over the same
+# manifest, correctly reported MOVED_GONE. The two directions disagreed --
+# exactly what .claude/plans/upstream-leak-guard/DESIGN.md says must be
+# impossible by construction.
+#
+# Same add-only-from-baseline plumbing as fixture 27 (content lands only at
+# the REAL destination, source untouched), but the manifest's MOVED cell names
+# a ONE-CHARACTER-TYPO'd destination that was never written anywhere -- the
+# reviewer's own reproduction. Because the source is untouched here too (same
+# reason as fixture 27), RESURRECTED fires as well; the assertion that matters
+# is MOVED_GONE specifically naming the WRONG (declared) destination, since
+# that is the exact verdict this defect skipped over, and that no leak-verdict
+# message appears -- a refusal to judge, not a leak report that happens to
+# also block it.
+echo "-- outbound: a MOVED destination that does not match where the content actually landed"
+TYPO_DEST="packages/backend/server/src/plugins/oauth/providers/woven-0idc.ts"
+mark_moved "$OIDC_PATH" "$TYPO_DEST" "$TMPDIR_T/m-moved-typo.md"
+typo_index="$TMPDIR_T/index.typo"
+oidc_entry_typo="$(git ls-tree HEAD -- "$OIDC_PATH")"
+oidc_mode_typo="$(printf '%s' "$oidc_entry_typo" | awk '{print $1}')"
+oidc_blob_typo="$(printf '%s' "$oidc_entry_typo" | awk '{print $3}')"
+GIT_INDEX_FILE="$typo_index" git read-tree "$OB_BASE"
+# The content lands at the REAL destination ($MOVED_DEST) -- the manifest cell
+# below names a DIFFERENT (typo'd) path, so the two never match.
+GIT_INDEX_FILE="$typo_index" git update-index --add --cacheinfo "${oidc_mode_typo},${oidc_blob_typo},${MOVED_DEST}"
+typo_tree="$(GIT_INDEX_FILE="$typo_index" git write-tree)"
+TYPO_REF="$(GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
+            GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
+            git commit-tree "$typo_tree" -p "$OB_BASE" -m 'outbound typo-destination fixture: manifest MOVED cell does not match where the content actually landed')"
+
+if [ -z "$TYPO_REF" ]; then
+  bad "could not build the typo-destination fixture commit"
+else
+  run_guard --outbound --base "$OB_BASE" --head "$TYPO_REF" --manifest "$TMPDIR_T/m-moved-typo.md"
+  expect_rc 1 "policy violation"
+  # Pins MOVED_GONE specifically: the declared (wrong) destination is named,
+  # proving the pre-gate is reading MOVED_GONE now, not just RESURRECTED.
+  expect_names "$TYPO_DEST"
+  if grep -qF -- "FORK-LOCAL CORE PATCH on an upstream-directed change set" "$OUT"; then
+    bad "outbound reported a LEAK verdict instead of refusing to judge -- the pre-gate is not consulting MOVED_GONE"
+  else
+    ok "blocked by a refusal to judge, not a leak verdict standing in by coincidence"
   fi
 fi
 

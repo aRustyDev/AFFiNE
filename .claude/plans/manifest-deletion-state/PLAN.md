@@ -45,14 +45,14 @@ Expected: every fixture `✔`, `rc=0`.
 **Modified:**
 
 - `scripts/woven-manifest-guard.sh` — `manifest_rows()` emits state + destination; the classifier gains `BADSTATE`; the row-resolution loop becomes state-aware and grows three new verdicts; `FORKLOCAL` gains clause 3. **All policy lives here.**
-- `scripts/woven-manifest-guard.test.sh` — ten new fixtures (18–27) alongside the existing seventeen.
+- `scripts/woven-manifest-guard.test.sh` — eleven new fixtures (18–28) alongside the existing seventeen.
 - `scripts/woven-patch-manifest.md` — the table gains the `State` column and the legend documents its vocabulary.
 
 **Created:** nothing. This is a change to one engine and its manifest.
 
 **Boundary:** the guard is the only file that decides what a State value means. The manifest is data; the test file asserts behaviour. No second parser anywhere.
 
-**A note on fixture numbers:** the task bodies below still cite the original plan's numbering (14–24), which — worked out before the suite's real shape was checked — collided with the pre-existing outbound fixtures 14–17. That numbering is left as-is in the steps below, as a historical record of what each task was actually told to do. The numbering that landed for Task 6 is 18–26 (see File Structure above and "Done when" below for the true mapping); fixture 27 was added in review as the realistic add-only exploit shape clause 3 must also catch, on top of Task 6 rather than as one of its originally-planned fixtures.
+**A note on fixture numbers:** the task bodies below still cite the original plan's numbering (14–24), which — worked out before the suite's real shape was checked — collided with the pre-existing outbound fixtures 14–17. That numbering is left as-is in the steps below, as a historical record of what each task was actually told to do. The numbering that landed for Task 6 is 18–26 (see File Structure above and "Done when" below for the true mapping); fixtures 27 and 28 were added in review, on top of Task 6 rather than as part of its originally-planned set — 27 for the realistic add-only exploit shape clause 3 must also catch, 28 for a code-review finding that the outbound pre-gate itself needed extending to RESURRECTED, OBSOLETE and MOVED_GONE (see "Post-review correction" in DESIGN.md).
 
 ---
 
@@ -543,6 +543,10 @@ micromamba run -n affine git commit -m "feat(woven): MOVED rows assert the desti
 
 This is the task that keeps the rename hole shut. Do not skip or reorder it.
 
+_(The fixture numbers below are the original plan's, since collided with the
+pre-existing suite — see the numbering note under File Structure for what
+actually landed: 18–26, plus fixture 27 and 28 added in review.)_
+
 **Files:**
 
 - Modify: `scripts/woven-manifest-guard.sh` (`FORKLOCAL` derivation)
@@ -753,7 +757,7 @@ micromamba run -n affine git commit -m "docs(woven): document the State column i
 
 ## Done when
 
-- `scripts/woven-manifest-guard.test.sh` is green, with fixtures 18–27 added.
+- `scripts/woven-manifest-guard.test.sh` is green, with fixtures 18–28 added.
 - Deleting an upstream-owned file has a reachable green state inbound (fixture 19). The outbound-side proof — a REMOVED FORK-LOCAL row is still blocked, a REMOVED ADDITIVE row is still sendable — is Task 7's work and has not landed as of Task 6.
 - Renaming one has a reachable green state inbound and is still caught outbound at its destination (fixtures 23, 26).
 - `STALE` names both causes and neither prescription produces the opposite failure (fixture 22).

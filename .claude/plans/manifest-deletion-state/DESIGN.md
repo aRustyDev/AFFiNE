@@ -87,6 +87,13 @@ Deletion inherits the existing vocabulary rather than needing a new policy. Give
 that the bead forbids weakening the outbound gate, a design that leaves it
 untouched is the safest available shape.
 
+**Correction, post-review:** "no change to the outbound gate" is true only of
+the LEAKED comparison above — deletion really does inherit Category with no new
+leak policy. It was NOT true of the outbound PRE-gate (the refusal to judge
+until inbound is clean), which this design's own new verdicts — RESURRECTED,
+OBSOLETE, MOVED_GONE — needed adding to and, for one commit, were not. See
+"Post-review correction" below.
+
 ### Vocabulary
 
 The `## Diverged upstream-owned files` table gains a `State` column, normalised
@@ -232,13 +239,49 @@ rename hole of clause 3 stayed shut. Fixture 10 is the migration guarantee.
 ## Non-goals
 
 - The outbound `STALE` gate is untouched. The bead forbids resolving this by
-  dropping it.
+  dropping it. **Corrected below:** untouched turned out to mean "not
+  rewritten", not "not extended" — the pre-gate this bullet refers to needed
+  RESURRECTED, OBSOLETE and MOVED_GONE added to what it consults, and for one
+  commit wasn't. See "Post-review correction" below.
 - `UNMANIFESTED` logic is unchanged.
 - No second manifest section and no second section-scoping rule in the parser —
   `affine-hn1.4` established one parser with one scoping rule, and this design
   keeps it.
 - `Delete when` keeps its meaning ("drop this row when") and already reads
   correctly for a REMOVED row.
+
+## Post-review correction: the outbound pre-gate must track every inbound verdict
+
+A code review after this design shipped found the gap the two notes above
+point to. `.claude/plans/upstream-leak-guard/DESIGN.md` ("Outbound is an
+ADDITIONAL question, not a separate one") requires outbound to refuse judging
+this change set at all unless every inbound check passes — not because the
+individual failure modes were enumerated and handled, but so that ANY future
+way of breaking the manifest-row-to-tree correspondence fails closed by
+construction, anticipated or not. This design added three new ways a row can
+break that correspondence — RESURRECTED, OBSOLETE, MOVED_GONE — on top of the
+two that existed (UNMANIFESTED, STALE). The outbound pre-gate, at the time,
+consulted only the original two. It was never extended to the three this
+design introduced.
+
+The consequence: a MOVED row whose declared destination did not match where
+the FORK-LOCAL content actually landed (a typo, a stale edit, a row nobody
+re-verified) produced MOVED_GONE inbound, correctly. Outbound's pre-gate never
+looked at MOVED_GONE, so it fell through to the leak comparison, found the
+declared (wrong) destination absent from the diff, and reported "safe to send
+upstream" at rc 0 while the real destination carried the whole patch. The two
+directions disagreed — the exact thing the upstream-leak-guard design says is
+supposed to be impossible.
+
+Fixed in `scripts/woven-manifest-guard.sh` by making the pre-gate consult a
+single accumulated `INBOUND_UNCLEAN` flag, set by all five inbound verdicts,
+rather than naming checks at the outbound site a second time — the second
+enumeration is exactly what let this ship. `UNDIVERGED` stays outside that
+flag, as ever: a row for a file that no longer differs cannot hide a patch.
+
+**Invariant, going forward:** any inbound verdict this guard ever grows must
+feed `INBOUND_UNCLEAN`. That flag is the only thing outbound's pre-gate
+consults, precisely so there is no second enumeration left to forget.
 
 ## Related
 
