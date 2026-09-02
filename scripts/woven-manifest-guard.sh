@@ -500,8 +500,8 @@ if [ -n "$OBSOLETE" ]; then
   rc=1
   err "OBSOLETE row(s) in ${MANIFEST#"$REPO_ROOT/"} — marked REMOVED, but absent from the baseline too:"
   while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$OBSOLETE"
-  err "  Upstream deleted the file as well, so the row no longer describes a divergence."
-  err "  Drop the row."
+  err "  Either upstream deleted the file too, or the path was never right (a typo) —"
+  err "  either way the row no longer describes a divergence. Drop the row."
 fi
 
 if [ -n "$UNDIVERGED" ]; then

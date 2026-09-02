@@ -435,9 +435,24 @@ expect_rc 1 "policy violation"
 expect_names "$SEED_PATH"
 
 # --- 17. OBSOLETE: upstream deleted it too, so the row describes nothing -----
+# A previous version of this fixture hijacked oidc.ts's OWN row (renaming its
+# path to the ghost path), which drops oidc.ts out of the manifest and trips
+# UNMANIFESTED(oidc.ts) on its own -- rc=1 regardless of whether OBSOLETE is
+# even reported. Verified by mutation: `rc=1` -> `:` in the OBSOLETE block
+# still left every fixture green. Fixed by ADDING a fourth row instead, so all
+# three real rows stay manifested and OBSOLETE is the only thing that can
+# fail the guard here.
 echo "-- obsolete: State=REMOVED on a path absent from the baseline"
 GHOST_REMOVED="packages/backend/server/src/gone-from-both.ts"
-sed "s|\`$OIDC_PATH\`|\`$GHOST_REMOVED\`|" "$MANIFEST" >"$TMPDIR_T/m-obs-1.md"
+awk -v p="$OIDC_PATH" -v ghost="$GHOST_REMOVED" '
+  { print }
+  $0 ~ p && /^\|/ && !done {
+    line = $0
+    sub(p, ghost, line)
+    print line
+    done = 1
+  }
+' "$MANIFEST" >"$TMPDIR_T/m-obs-1.md"
 awk -v p="$GHOST_REMOVED" '
   $0 ~ p && /^\|/ { sub(/[[:space:]]*\|[[:space:]]*$/, " | **REMOVED** |"); }
   { print }
@@ -445,6 +460,11 @@ awk -v p="$GHOST_REMOVED" '
 run_guard --manifest "$TMPDIR_T/m-obsolete.md" --head HEAD
 expect_rc 1 "policy violation"
 expect_names "$GHOST_REMOVED"
+if grep -qF -- "UNMANIFESTED" "$OUT"; then
+  bad "fixture 17 tripped UNMANIFESTED instead of testing OBSOLETE in isolation"
+else
+  ok "no UNMANIFESTED noise -- OBSOLETE is the sole reported verdict"
+fi
 
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
