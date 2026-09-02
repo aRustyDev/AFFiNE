@@ -483,6 +483,28 @@ else
   trap 'rm -rf "$TMPDIR_T"' EXIT
 fi
 
+# --- 19. MOVED: source gone, destination present -> clean --------------------
+echo "-- moved: git mv oidc.ts, row State=MOVED <dest> -> clean"
+mark_moved "$OIDC_PATH" "$MOVED_DEST" "$TMPDIR_T/m-moved.md"
+if ! git diff --quiet -- "$OIDC_PATH" 2>/dev/null; then
+  bad "$OIDC_PATH already has uncommitted changes; skipping"
+else
+  trap 'restore_move; rm -rf "$TMPDIR_T"' EXIT
+  git mv "$OIDC_PATH" "$MOVED_DEST"
+  run_guard --manifest "$TMPDIR_T/m-moved.md"
+  expect_rc 0 "declared rename is clean"
+
+  # --- 20. MOVED with a destination that is not there is a violation ---------
+  echo "-- moved: destination absent -> violation"
+  mark_moved "$OIDC_PATH" "packages/backend/server/src/never-created.ts" "$TMPDIR_T/m-moved-gone.md"
+  run_guard --manifest "$TMPDIR_T/m-moved-gone.md"
+  expect_rc 1 "policy violation"
+  expect_names "never-created.ts"
+
+  restore_move
+  trap 'rm -rf "$TMPDIR_T"' EXIT
+fi
+
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

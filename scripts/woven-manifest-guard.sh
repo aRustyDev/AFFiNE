@@ -39,6 +39,9 @@
 #   7. OBSOLETE        — a row's State is REMOVED or MOVED, but the path was
 #                         already absent at the baseline too, so the row no
 #                         longer describes any divergence.
+#   8. MOVED GONE      — a row's State is MOVED, but its destination path is
+#                         not in the tree — the file was never put there, or
+#                         the destination itself is a typo.
 #   Every offending path is printed, so the fix is mechanical rather than a
 #   re-audit. Rows for files that no longer diverge are reported as a WARNING
 #   only — harmless staleness, not a reason to block a PR.
@@ -510,6 +513,14 @@ if [ -n "$OBSOLETE" ]; then
   while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$OBSOLETE"
   err "  Either upstream deleted the file too, or the path was never right (a typo) —"
   err "  either way the row no longer describes a divergence. Drop the row."
+fi
+
+if [ -n "$MOVED_GONE" ]; then
+  rc=1
+  err "MOVED row(s) in ${MANIFEST#"$REPO_ROOT/"} whose destination is not in the tree:"
+  while IFS= read -r l; do [ -n "$l" ] && err "    $l"; done <<< "$MOVED_GONE"
+  err "  Point State at the path the file actually has now, or use REMOVED if the"
+  err "  fork dropped it rather than relocating it."
 fi
 
 if [ -n "$UNDIVERGED" ]; then
