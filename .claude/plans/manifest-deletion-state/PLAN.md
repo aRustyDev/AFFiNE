@@ -18,11 +18,9 @@
 
 Run every command from the repository root.
 
-This box has **no system-wide node or yarn**. Every `git commit` must run through the repo env, or the husky pre-commit hook dies with `yarn: command not found`:
-
-```bash
-micromamba run -n affine git commit -m "..."
-```
+Committing runs the husky `pre-commit` hook, which shells out to `yarn` for
+`lint-staged` and `yarn lint:ox`. Make sure the repository's Node toolchain is on
+`PATH` for the commit itself, or the hook fails with `yarn: command not found`.
 
 The guard and its suite are pure `bash`/`awk` and need no toolchain, so they run directly:
 
@@ -190,7 +188,7 @@ Expected: fixture 14 now `✔ exit 2`, every pre-existing fixture still `✔`, `
 - [ ] **Step 8: Commit**
 
 ```bash
-micromamba run -n affine git commit -m "feat(woven): parse a State column in the patch manifest, fail closed on unknown values (affine-83p)"
+git commit -m "feat(woven): parse a State column in the patch manifest, fail closed on unknown values (affine-83p)"
 ```
 
 ---
@@ -317,7 +315,7 @@ Expected: fixture 15 `✔ exit 0`. Every existing fixture still `✔` — includ
 - [ ] **Step 6: Commit**
 
 ```bash
-micromamba run -n affine git commit -m "fix(woven): a REMOVED manifest row is satisfied by an absent path (affine-83p)"
+git commit -m "fix(woven): a REMOVED manifest row is satisfied by an absent path (affine-83p)"
 ```
 
 ---
@@ -389,7 +387,7 @@ Expected: fixtures 16 and 17 `✔ exit 1` and both name their path. All earlier 
 - [ ] **Step 5: Commit**
 
 ```bash
-micromamba run -n affine git commit -m "feat(woven): RESURRECTED and OBSOLETE verdicts for REMOVED rows (affine-83p)"
+git commit -m "feat(woven): RESURRECTED and OBSOLETE verdicts for REMOVED rows (affine-83p)"
 ```
 
 ---
@@ -462,7 +460,7 @@ Expected: fixture 18 fully `✔`. All earlier fixtures still `✔`.
 - [ ] **Step 6: Commit**
 
 ```bash
-micromamba run -n affine git commit -m "fix(woven): STALE names both causes instead of prescribing the opposite failure (affine-83p)"
+git commit -m "fix(woven): STALE names both causes instead of prescribing the opposite failure (affine-83p)"
 ```
 
 ---
@@ -534,7 +532,7 @@ Expected: fixtures 19 and 20 both `✔`. All earlier fixtures still `✔`.
 - [ ] **Step 5: Commit**
 
 ```bash
-micromamba run -n affine git commit -m "feat(woven): MOVED rows assert the destination exists (affine-83p)"
+git commit -m "feat(woven): MOVED rows assert the destination exists (affine-83p)"
 ```
 
 ---
@@ -621,7 +619,7 @@ Expected: fixture 21 `✔ exit 1` and `✔ output names .../woven-oidc.ts`. All 
 - [ ] **Step 5: Commit**
 
 ```bash
-micromamba run -n affine git commit -m "feat(woven): a MOVED destination joins the outbound FORK-LOCAL set (affine-83p)"
+git commit -m "feat(woven): a MOVED destination joins the outbound FORK-LOCAL set (affine-83p)"
 ```
 
 ---
@@ -679,7 +677,7 @@ Expected: both `✔` with **no production change**. If either fails, the design'
 - [ ] **Step 3: Commit**
 
 ```bash
-micromamba run -n affine git commit -m "test(woven): deletion inherits its row's upstreamability (affine-83p)"
+git commit -m "test(woven): deletion inherits its row's upstreamability (affine-83p)"
 ```
 
 ---
@@ -760,7 +758,7 @@ Expected: `rc=0`, `✔ every upstream-owned divergence is manifested, and every 
 - [ ] **Step 7: Commit**
 
 ```bash
-micromamba run -n affine git commit -m "docs(woven): document the State column in the patch manifest (affine-83p)"
+git commit -m "docs(woven): document the State column in the patch manifest (affine-83p)"
 ```
 
 ---
