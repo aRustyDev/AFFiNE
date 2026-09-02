@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import test from 'ava';
 
-import type { CompatReport } from '../compat';
+import { type CompatReport, REFUSING_VERDICTS, type Verdict } from '../compat';
 import { DEPLOYMENT_STAMP_ID, readStamp, writeStamp } from '../identity';
 import { DbCompatService, decide } from '../service';
 
@@ -129,7 +129,19 @@ test('EQUAL with populated: false adopts as fresh-install, not implicit', t => {
   t.is(decision.adopt, 'fresh-install');
 });
 
-test('DB_BEHIND with a BLOCKING pending migration but populated: false does not refuse — nothing to protect', t => {
+// Important 1 (second re-review), inverted from the original ("nothing to
+// protect") version of this test, which asserted the bug as intended: the
+// coordinator's own reasoning for "populated: false means no data" was
+// wrong (`populated` is a real Postgres read of `user.count()`/
+// `workspace.count()`, and AFFiNE preserves workspaces when users are
+// deleted — see `db-state.ts`). The BLOCKING gate must not depend on
+// `populated` being right: it now runs BEFORE the fresh-install return, and
+// fires for every non-VIRGIN verdict regardless of `populated`. Only
+// `VIRGIN` is exempt (see the next test) — a genuinely fresh post-migrate
+// install always has `pending: []` by construction, so this is a no-op
+// there and the original mislabel fix (`populated: false` -> fresh-install)
+// stays intact for the cases that matter.
+test('DB_BEHIND with a BLOCKING pending migration REFUSES even when populated reads false — the gate must not depend on populated being right', t => {
   const decision = decide(
     report({
       verdict: 'DB_BEHIND',
@@ -139,8 +151,38 @@ test('DB_BEHIND with a BLOCKING pending migration but populated: false does not 
     }),
     { adopt: false }
   );
+  t.false(decision.ok);
+  t.regex(decision.refusal!, /AFFINE_DB_ADOPT/);
+});
+
+test('VIRGIN bypasses the BLOCKING gate even with BLOCKING migrations pending — gating a fresh install would be absurd', t => {
+  const decision = decide(
+    report({
+      verdict: 'VIRGIN',
+      populated: false,
+      pending: [{ name: 'm1', tier: 'BLOCKING', hits: [] }],
+      rollbackPossible: false,
+    }),
+    { adopt: false }
+  );
   t.true(decision.ok);
   t.is(decision.adopt, 'fresh-install');
+});
+
+// Minor 3: `alreadyStamped` must be an explicit allow-list
+// (`unchecked`/`match`), not `!== 'absent'`. `IdentityState` also has
+// `mismatch` and `corrupt` arms, both of which always force a refusing
+// `IDENTITY_MISMATCH` verdict in `compat.ts` — so in practice this never
+// actually reaches the "already adopted, do nothing" shortcut. But that
+// safety is emergent across two files; this test constructs the
+// (buildReport-impossible) combination directly to prove `decide()` does
+// not rely on it.
+test('a corrupt identity does not take the "already adopted" shortcut, even paired with a proceeding verdict', t => {
+  const decision = decide(
+    report({ verdict: 'EQUAL', identity: { kind: 'corrupt' } }),
+    { adopt: false }
+  );
+  t.not(decision.adopt, null);
 });
 
 // Every member of REFUSING_VERDICTS, including the ninth verdict added in T2.
@@ -175,13 +217,48 @@ test('UNREADABLE refuses to mutate but reports as undetermined', t => {
 // and the obvious `if (!decision.ok) throw` would take the whole fleet down
 // on a packaging fault, exactly what D9 exists to prevent. `bootMayContinue`
 // makes the asymmetry part of the decision's own contract.
-test('bootMayContinue is true only for UNREADABLE, not for a genuine refusal like DB_AHEAD', t => {
+//
+// Minor 1: the field is true for every `ok: true` decision too, not "only"
+// for UNREADABLE — the doc comment said "only" and was wrong about that;
+// this test covers all three cases so the doc and the behavior can't drift
+// apart again unnoticed.
+test('bootMayContinue is true for every ok:true decision, and uniquely among refusals for UNREADABLE', t => {
+  t.true(decide(report({}), { adopt: false }).bootMayContinue); // EQUAL, ok: true
   t.true(
     decide(report({ verdict: 'UNREADABLE' }), { adopt: false }).bootMayContinue
   );
   t.false(
     decide(report({ verdict: 'DB_AHEAD' }), { adopt: false }).bootMayContinue
   );
+});
+
+// Minor 2: `Verdict` gaining a tenth member without being classified is
+// caught at COMPILE time inside `service.ts` (a `Record<Verdict, ...>` that
+// TypeScript requires be exhaustive) — that part can't be exercised from a
+// test. What a test CAN check is that the CURRENT nine verdicts are
+// classified consistently with `REFUSING_VERDICTS`, the canonical list
+// other consumers (a future renderer/guard) read: every verdict in that set
+// must refuse here, and no verdict outside it (other than UNREADABLE) may.
+test('decide() refusal behavior stays consistent with compat.ts REFUSING_VERDICTS', t => {
+  const ALL_VERDICTS: Verdict[] = [
+    'VIRGIN',
+    'EQUAL',
+    'DB_BEHIND',
+    'DB_AHEAD',
+    'DIVERGED',
+    'IDENTITY_MISMATCH',
+    'MIGRATION_FAILED',
+    'SCHEMA_INCOMPLETE',
+    'UNREADABLE',
+  ];
+  for (const verdict of ALL_VERDICTS) {
+    const decision = decide(report({ verdict }), { adopt: false });
+    if (verdict === 'UNREADABLE') {
+      t.false(decision.ok, verdict);
+      continue;
+    }
+    t.is(!decision.ok, REFUSING_VERDICTS.has(verdict), verdict);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -337,6 +414,42 @@ test('stamp() on an already-adopted database updates only lastMigratedBy', async
         await scratch.appConfig.count({ where: { id: DEPLOYMENT_STAMP_ID } }),
         1
       );
+    }
+  );
+});
+
+// Important 1, end-to-end. `populated` used to mean "has any USERS"
+// (`user.count() > 0` alone). AFFiNE deliberately preserves workspaces,
+// documents, and blobs when a user is deleted — `Workspace` has no foreign
+// key to `User` at all, `Blob` cascades from `Workspace` (not `User`), and
+// `Snapshot.createdByUser`/`updatedByUser` are `onDelete: SetNull`, with the
+// schema's own comment reading "should not delete origin snapshot even if
+// user is deleted / we only delete the snapshot if the workspace is
+// deleted". A database with real workspaces and zero users — e.g. a
+// production clone with `users` truncated to scrub PII — is exactly the
+// case the adoption gate exists to protect. Reproduced here with no
+// `_prisma_migrations` table at all, so every one of the repository's real
+// migrations is "pending", which includes several BLOCKING ones.
+test('check() refuses on a database with workspaces but no users and a BLOCKING migration pending', async t => {
+  await withScratchSchema(
+    'db_compat_service_workspaces_no_users',
+    async schema => {
+      await db.$executeRawUnsafe(
+        `CREATE TABLE "${schema}"."users" (id text PRIMARY KEY)`
+      );
+      await db.$executeRawUnsafe(
+        `CREATE TABLE "${schema}"."workspaces" (id text PRIMARY KEY)`
+      );
+      await db.$executeRawUnsafe(
+        `INSERT INTO "${schema}"."workspaces" (id) VALUES ('ws-1'), ('ws-2')`
+      );
+    },
+    async scratch => {
+      const service = new DbCompatService(scratch);
+      const decision = await service.check({});
+      t.is(decision.report.populated, true);
+      t.false(decision.ok);
+      t.regex(decision.refusal!, /AFFINE_DB_ADOPT/);
     }
   );
 });

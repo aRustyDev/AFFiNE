@@ -95,6 +95,22 @@ function isBuildRef(value: unknown): value is BuildRef {
 }
 
 /**
+ * `lastMigratedBy` is optional on `DeploymentStamp`, but WHEN present it
+ * must be well-formed — it is the field most likely to actually be present
+ * on any given stamp, since `DbCompatService.stamp()` writes it on every
+ * `db stamp` run, not just the first. Same defect class as `adoptedBy`
+ * above: a malformed value here must make the stamp corrupt rather than
+ * parse "successfully" and let a renderer crash on `lastMigratedBy.version`.
+ */
+function isLastMigratedBy(value: unknown): value is BuildRef & { at: string } {
+  if (!isBuildRef(value)) {
+    return false;
+  }
+  const at = (value as unknown as { at?: unknown }).at;
+  return typeof at === 'string' && at.length > 0;
+}
+
+/**
  * Validates every field a caller might dereference, not just `deploymentId`.
  * A stamp that parsed as "valid" with `adoptionMode`/`adoptedBy` silently
  * `undefined` would let a renderer crash on `adoptedBy.version` later — in a
@@ -119,6 +135,12 @@ function parseStamp(value: unknown): DeploymentStamp | null {
     return null;
   }
   if (!isBuildRef(candidate.adoptedBy)) {
+    return null;
+  }
+  if (
+    candidate.lastMigratedBy !== undefined &&
+    !isLastMigratedBy(candidate.lastMigratedBy)
+  ) {
     return null;
   }
   return candidate as DeploymentStamp;
@@ -189,7 +211,8 @@ export async function writeStamp(
         'writeStamp() was called before app_configs exists. This is a caller ' +
           'bug: the deployment stamp can only be written after `prisma migrate ' +
           'deploy` has run — see DbCompatService.stamp(), which is the only ' +
-          'intended caller.'
+          'intended caller.',
+        { cause: error }
       );
     }
     throw error;

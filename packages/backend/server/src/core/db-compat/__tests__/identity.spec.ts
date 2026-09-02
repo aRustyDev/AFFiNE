@@ -111,6 +111,10 @@ test('writeStamp throws a clear caller-bug error rather than a raw P2021 pre-mig
       writeStamp(scratch, stamp('prod-a'))
     );
     t.regex(error!.message, /app_configs/i);
+    // Minor 4: the original Prisma error (code, table name, stack) must not
+    // be lost — it's the only thing that would tell an on-call engineer
+    // WHICH table was missing if this error is ever hit for real.
+    t.truthy((error as Error & { cause?: unknown }).cause);
   });
 });
 
@@ -175,6 +179,38 @@ test('readStamp rejects an empty adoptedAt as corrupt', async t => {
   });
   const { corrupt } = await readStamp(db);
   t.true(corrupt);
+});
+
+// Minor 6: `lastMigratedBy` is the field most likely to be present on any
+// given stamp, since `DbCompatService`'s `stamp()` writes it on every `db
+// stamp` run (not just the first). It is the same defect class as the
+// `adoptedBy` hole closed above, for the same always-exit-0 consumer: a
+// malformed `lastMigratedBy` must make the whole stamp corrupt, not parse
+// "successfully" with a renderer left to crash on `lastMigratedBy.version`.
+test('readStamp rejects a malformed lastMigratedBy as corrupt', async t => {
+  await db.appConfig.create({
+    data: {
+      id: DEPLOYMENT_STAMP_ID,
+      value: {
+        deploymentId: 'prod-a',
+        adoptedAt: '2026-01-01T00:00:00.000Z',
+        adoptionMode: 'explicit',
+        adoptedBy: { version: '0.27.0', buildSha: 'abc' },
+        // missing `buildSha` and `at`.
+        lastMigratedBy: { version: '0.27.0' },
+      },
+    },
+  });
+  const { stamp: read, corrupt } = await readStamp(db);
+  t.is(read, null);
+  t.true(corrupt);
+});
+
+test('readStamp accepts a stamp with no lastMigratedBy at all (optional field)', async t => {
+  await writeStamp(db, stamp('prod-a'));
+  const { stamp: read, corrupt } = await readStamp(db);
+  t.false(corrupt);
+  t.is(read?.lastMigratedBy, undefined);
 });
 
 // Tests the ACTUAL mechanism from grounding G3 rather than booting a module and

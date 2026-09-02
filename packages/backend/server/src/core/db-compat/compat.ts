@@ -34,15 +34,16 @@ export interface CompatInput {
   hasMigrationsTable: boolean;
   appliedRows: MigrationRow[];
   /**
-   * Whether the database has user data. `null` means this could not be
-   * determined (the `users` table itself is missing) — see `DbState.populated`
-   * in `db-state.ts`. Where migration history exists (`hasMigrationsTable:
-   * true`), `null` must never be collapsed into `false`: an undetermined
-   * population on a database that otherwise has recorded history is a schema
-   * inconsistency (`SCHEMA_INCOMPLETE`), not evidence of "empty". When there
-   * is no migration history either, `null` and `false` are treated alike
-   * (see `VIRGIN` below) — a schema with neither table is genuinely empty
-   * rather than contradictory.
+   * Whether the database has real content — counting both `users` and
+   * `workspaces` rows, not users alone; see `DbState.populated` in
+   * `db-state.ts` for why. `null` means this could not be determined (one
+   * of those two tables itself is missing). Where migration history exists
+   * (`hasMigrationsTable: true`), `null` must never be collapsed into
+   * `false`: an undetermined population on a database that otherwise has
+   * recorded history is a schema inconsistency (`SCHEMA_INCOMPLETE`), not
+   * evidence of "empty". When there is no migration history either, `null`
+   * and `false` are treated alike (see `VIRGIN` below) — a schema with
+   * neither table is genuinely empty rather than contradictory.
    */
   populated: boolean | null;
   stamp: DeploymentStamp | null;

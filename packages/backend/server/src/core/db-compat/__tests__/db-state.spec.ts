@@ -95,6 +95,88 @@ test('readDbState reports populated true when the users table has rows', async t
   }
 });
 
+// Important 1 (second re-review): `populated` used to mean "has any USERS"
+// (`user.count() > 0` alone). AFFiNE deliberately preserves workspaces,
+// documents, and blobs when a user is deleted — `Workspace` has no foreign
+// key to `User` at all, `Blob` cascades from `Workspace` (not `User`), and
+// `Snapshot.createdByUser`/`updatedByUser` are `onDelete: SetNull`, with the
+// schema's own comment reading "should not delete origin snapshot even if
+// user is deleted / we only delete the snapshot if the workspace is
+// deleted". A database with real workspaces and zero users — e.g. a
+// production clone with `users` truncated to scrub PII — is exactly the
+// case the adoption gate exists to protect, and used to read as `populated:
+// false`, sailing through as a "fresh install".
+test('readDbState reports populated true when the workspaces table has rows but users does not', async t => {
+  const SCRATCH = 'db_compat_scratch_workspaces_populated';
+  await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${SCRATCH}"`);
+  // `users` exists but is empty (the "truncated to scrub PII" scenario,
+  // where the table survives but every row is gone) — distinct from the
+  // table being entirely absent, which is the undetermined (`null`) case
+  // covered elsewhere.
+  await db.$executeRawUnsafe(
+    `CREATE TABLE "${SCRATCH}"."users" (id text PRIMARY KEY)`
+  );
+  await db.$executeRawUnsafe(
+    `CREATE TABLE "${SCRATCH}"."workspaces" (id text PRIMARY KEY)`
+  );
+  await db.$executeRawUnsafe(
+    `INSERT INTO "${SCRATCH}"."workspaces" (id) VALUES ('ws-1'), ('ws-2')`
+  );
+  const scratch = scratchClient(SCRATCH);
+
+  try {
+    const state = await readDbState(scratch);
+    t.is(state.populated, true);
+  } finally {
+    await scratch.$disconnect();
+    await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  }
+});
+
+test('readDbState reports populated false only when both users and workspaces are readable and empty', async t => {
+  const SCRATCH = 'db_compat_scratch_both_empty';
+  await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${SCRATCH}"`);
+  await db.$executeRawUnsafe(
+    `CREATE TABLE "${SCRATCH}"."users" (id text PRIMARY KEY)`
+  );
+  await db.$executeRawUnsafe(
+    `CREATE TABLE "${SCRATCH}"."workspaces" (id text PRIMARY KEY)`
+  );
+  const scratch = scratchClient(SCRATCH);
+
+  try {
+    const state = await readDbState(scratch);
+    t.is(state.populated, false);
+  } finally {
+    await scratch.$disconnect();
+    await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  }
+});
+
+test('readDbState reports populated null when users exists but workspaces does not (either missing is undetermined)', async t => {
+  const SCRATCH = 'db_compat_scratch_workspaces_missing';
+  await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${SCRATCH}"`);
+  await db.$executeRawUnsafe(
+    `CREATE TABLE "${SCRATCH}"."users" (id text PRIMARY KEY)`
+  );
+  // No `workspaces` table at all — a schema where one of the two tables
+  // exists and the other doesn't is itself contradictory (caught by
+  // `SCHEMA_INCOMPLETE` in `compat.ts` when migration history is present),
+  // not evidence of "empty".
+  const scratch = scratchClient(SCRATCH);
+
+  try {
+    const state = await readDbState(scratch);
+    t.is(state.populated, null);
+  } finally {
+    await scratch.$disconnect();
+    await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  }
+});
+
 test('readDbState reports populated null when migration history exists but the users table is missing', async t => {
   // The restore/DR scenario affine-tc6 exists for: a partially-restored
   // database that recorded migration history but is missing a core table.
