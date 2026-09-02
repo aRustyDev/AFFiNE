@@ -683,6 +683,110 @@ else
   fi
 fi
 
+# --- 29. a REMOVED FORK-LOCAL row still cannot go upstream -------------------
+# affine-83p's central bet: State is ORTHOGONAL to Category, so deletion
+# inherits its row's upstreamability rather than needing a policy of its own.
+# This fixture is the FORK-LOCAL half of that bet. A branch cut from the
+# upstream baseline (the shape woven-upstream-branch.sh builds, same as
+# fixtures 17/27/28) whose ONLY change is to DELETE oidc.ts, with the
+# manifest's oidc.ts row marked REMOVED so inbound is fully clean over it —
+# RESURRECTED and OBSOLETE both require the path to be either present or
+# absent-at-baseline-too, neither of which holds here. A REMOVED row still
+# contributes its path to FORKLOCAL unconditionally (the classifier ignores
+# State when building that set — see the FORKLOCAL awk above), so the
+# deletion still lands in LEAKED. Built with the same scratch-index plumbing
+# as fixture 17: read-tree the baseline, THEN force-remove the one path,
+# write-tree, commit-tree with the baseline as parent — no branch, index or
+# working tree touched, so none of the stranded-tree hazard fixtures 23-26
+# guard against applies here either.
+echo "-- outbound: a REMOVED FORK-LOCAL row still cannot go upstream"
+mark_removed "$OIDC_PATH" "$TMPDIR_T/m-removed-oidc-ob.md"
+rm29_index="$TMPDIR_T/index.rm29"
+GIT_INDEX_FILE="$rm29_index" git read-tree "$OB_BASE"
+GIT_INDEX_FILE="$rm29_index" git update-index --force-remove "$OIDC_PATH"
+rm29_tree="$(GIT_INDEX_FILE="$rm29_index" git write-tree)"
+RM29_REF="$(GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
+            GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
+            git commit-tree "$rm29_tree" -p "$OB_BASE" -m 'outbound REMOVED fork-local fixture: delete oidc.ts')"
+
+if [ -z "$RM29_REF" ]; then
+  bad "could not build the REMOVED-fork-local fixture commit"
+else
+  run_guard --outbound --base "$OB_BASE" --head "$RM29_REF" --manifest "$TMPDIR_T/m-removed-oidc-ob.md"
+  expect_rc 1 "policy violation"
+  expect_names "$OIDC_PATH"
+
+  # Discriminating: rc 1 must come from the LEAK check specifically (deletion
+  # still counts as FORK-LOCAL), not from some unrelated pre-gate refusal that
+  # would pass this fixture for the wrong reason.
+  if grep -qF -- "FORK-LOCAL CORE PATCH on an upstream-directed change set" "$OUT"; then
+    ok "blocked by the leak verdict specifically -- deletion still counts as FORK-LOCAL"
+  else
+    bad "expected a LEAK verdict naming the deleted FORK-LOCAL row, not whatever this is"; dump
+  fi
+  if grep -qF -- "cannot judge this change set" "$OUT"; then
+    bad "outbound refused to judge instead of reaching the leak check -- fixture is not isolating deletion"
+  else
+    ok "outbound reached the leak check (inbound was fully clean over the REMOVED row)"
+  fi
+
+  # Shape: exactly one change vs baseline, that one change IS upstream-owned
+  # (oidc.ts existed at the baseline), and the manifest's row count is
+  # unaffected by mark_removed (still 3 rows) -- pins this as the intended
+  # baseline-minus-one-FORK-LOCAL-file shape, not some other reason to fail.
+  if grep -qF -- "1 changed vs baseline · 1 upstream-owned · 3 manifest row(s)" "$OUT"; then
+    ok "fixture commit really is baseline minus the one FORK-LOCAL file (1 upstream-owned, 3 rows)"
+  else
+    bad "fixture commit does not match the intended REMOVED-FORK-LOCAL shape"; dump
+  fi
+fi
+
+# --- 30. a REMOVED ADDITIVE row IS sendable upstream --------------------------
+# The ADDITIVE half of the same bet, and the contrast that actually proves it:
+# if deletion were treated as categorically un-sendable (a hypothetical third
+# "FORK-LOCAL DELETION" bucket, or a blanket "any REMOVED row blocks outbound"
+# rule) this fixture would fail. Same construction as #29 but deleting
+# seed/index.ts (an ADDITIVE row) instead, with THAT row marked REMOVED.
+# oidc.ts is never touched by this fixture, so it stays byte-identical to the
+# baseline and never enters CHANGED -- asserted explicitly below, not just
+# assumed, since a stray touch of oidc.ts would make this fixture pass for the
+# wrong reason (or fail outright).
+echo "-- outbound: a REMOVED ADDITIVE row IS sendable upstream"
+mark_removed "$SEED_PATH" "$TMPDIR_T/m-removed-seed-ob.md"
+rm30_index="$TMPDIR_T/index.rm30"
+GIT_INDEX_FILE="$rm30_index" git read-tree "$OB_BASE"
+GIT_INDEX_FILE="$rm30_index" git update-index --force-remove "$SEED_PATH"
+rm30_tree="$(GIT_INDEX_FILE="$rm30_index" git write-tree)"
+RM30_REF="$(GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
+            GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
+            git commit-tree "$rm30_tree" -p "$OB_BASE" -m 'outbound REMOVED additive fixture: delete seed/index.ts')"
+
+if [ -z "$RM30_REF" ]; then
+  bad "could not build the REMOVED-additive fixture commit"
+else
+  run_guard --outbound --base "$OB_BASE" --head "$RM30_REF" --manifest "$TMPDIR_T/m-removed-seed-ob.md"
+  expect_rc 0 "clean -- deletion of an ADDITIVE row is sendable"
+
+  # Shape: exactly one change vs baseline, that one change IS upstream-owned
+  # (seed/index.ts existed at the baseline) -- rules out the degenerate "empty
+  # diff" failure mode write-tree/commit-tree would otherwise absorb silently.
+  if grep -qF -- "1 changed vs baseline · 1 upstream-owned · 3 manifest row(s)" "$OUT"; then
+    ok "fixture commit really is baseline minus the one ADDITIVE file (1 upstream-owned, 3 rows)"
+  else
+    bad "fixture commit does not match the intended REMOVED-ADDITIVE shape"; dump
+  fi
+  if grep -qF -- "no FORK-LOCAL CORE PATCH in this change set" "$OUT"; then
+    ok "cleared by the outbound check specifically"
+  else
+    bad "exit 0 did not come from the outbound clean path"; dump
+  fi
+  if grep -qF -- "$OIDC_PATH" "$OUT"; then
+    bad "oidc.ts appeared in the output -- it should never have entered CHANGED for this fixture"
+  else
+    ok "oidc.ts never entered CHANGED (left byte-identical to the baseline)"
+  fi
+fi
+
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]
