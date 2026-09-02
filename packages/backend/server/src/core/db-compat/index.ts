@@ -19,4 +19,5 @@ export class DbCompatModule {}
 
 export { classifyDdl, type DdlTier } from './classify';
 export { type CompatReport, type Verdict } from './compat';
+export { renderReport } from './render';
 export { type CompatDecision, DbCompatService } from './service';

@@ -4,6 +4,8 @@ import { type INestApplicationContext, Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { Command, CommanderError } from 'commander';
 
+import { DbCompatService, renderReport } from './core/db-compat';
+import { DbCompatCliModule } from './core/db-compat/cli-module';
 import { CliAppModule } from './data/app';
 import { CreateCommand } from './data/commands/create';
 import { ImportConfigCommand } from './data/commands/import';
@@ -18,6 +20,21 @@ async function withCliApp(
   callback: (app: INestApplicationContext) => Promise<void>
 ) {
   const app = await NestFactory.createApplicationContext(CliAppModule, {
+    logger,
+  });
+
+  try {
+    await callback(app);
+  } finally {
+    await app.close();
+  }
+}
+
+async function withMinimalApp(
+  logger: Logger,
+  callback: (app: INestApplicationContext) => Promise<void>
+) {
+  const app = await NestFactory.createApplicationContext(DbCompatCliModule, {
     logger,
   });
 
@@ -70,6 +87,76 @@ function buildProgram(logger: Logger) {
     .action(async path => {
       await withCliApp(logger, async app => {
         await app.get(ImportConfigCommand).execute(path);
+      });
+    });
+
+  const dbCommand = program
+    .command('db')
+    .description('database compatibility and adoption');
+
+  dbCommand
+    .command('status')
+    .description(
+      'report migration compatibility, pending migrations and rollback safety'
+    )
+    .option('--json', 'emit the raw report as JSON')
+    .action(async (options: { json?: boolean }) => {
+      await withMinimalApp(logger, async app => {
+        const report = await app.get(DbCompatService).report();
+        // Written to stdout, not the logger: this is a report an operator reads
+        // or a machine parses, not a log line.
+        process.stdout.write(
+          (options.json
+            ? JSON.stringify(report, null, 2)
+            : renderReport(report)) + '\n'
+        );
+      });
+    });
+
+  dbCommand
+    .command('check')
+    .description(
+      'gate: exit non-zero unless this database is safe for this binary to migrate'
+    )
+    .option(
+      '--adopt',
+      'confirm a pre-existing database is intended, even across a contract'
+    )
+    .action(async (options: { adopt?: boolean }) => {
+      await withMinimalApp(logger, async app => {
+        const decision = await app
+          .get(DbCompatService)
+          .check({ adopt: options.adopt });
+
+        process.stdout.write(renderReport(decision.report) + '\n');
+
+        if (!decision.ok) {
+          logger.error(
+            `database compatibility check FAILED: ${decision.refusal}`
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        logger.log(
+          `database compatibility check passed (${decision.report.verdict})`
+        );
+      });
+    });
+
+  // Separate from `check` because the stamp lives in `app_configs`, which does not
+  // exist on a fresh install until `prisma migrate deploy` has run — and the gate
+  // must run BEFORE that to be worth anything. See D17. Idempotent, so the
+  // predeploy script can call it unconditionally on every deploy.
+  dbCommand
+    .command('stamp')
+    .description(
+      'record the deployment stamp; run AFTER migrations. Idempotent.'
+    )
+    .option('--adopt', 'record the adoption as explicit rather than implicit')
+    .action(async (options: { adopt?: boolean }) => {
+      await withMinimalApp(logger, async app => {
+        await app.get(DbCompatService).stamp({ adopt: options.adopt });
       });
     });
 
