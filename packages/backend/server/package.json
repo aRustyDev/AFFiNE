@@ -19,7 +19,7 @@
     "seed": "r ./src/seed/index.ts",
     "genconfig": "r ./scripts/genconfig.ts",
     "cli": "cross-env SERVER_FLAVOR=script node ./dist/main.js",
-    "predeploy": "yarn prisma migrate deploy && yarn cli run",
+    "predeploy": "yarn cli db check && yarn prisma migrate deploy && yarn cli run && yarn cli db stamp",
     "postinstall": "prisma generate"
   },
   "dependencies": {

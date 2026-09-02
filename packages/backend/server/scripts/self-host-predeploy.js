@@ -111,10 +111,18 @@ function recordAdoption() {
 }
 
 prepare();
+// Must run BEFORE the gate, not after: `compat.ts` excludes rolled-back rows
+// from `failed`, so gating first would return MIGRATION_FAILED on exactly the
+// databases this repair exists to heal, wedging those upgrades permanently.
+// It can write `rolled_back_at` onto a `_prisma_migrations` row, but that is
+// bookkeeping, not schema — no CREATE/ALTER/DROP runs until
+// `runPrismaMigrations()` below.
 fixFailedMigrations();
-// Gate BEFORE any migration runs. `execSync` throws on a non-zero exit, so a
-// refusal aborts this script: the k8s initContainer wedges in Init and the old
-// fleet keeps serving, and the compose one-shot fails before the server starts.
+// Gate before any SCHEMA-mutating migration runs (fixFailedMigrations above
+// only marks bookkeeping rows, never DDL). `execSync` throws on a non-zero
+// exit, so a refusal aborts this script: the k8s initContainer wedges in Init
+// and the old fleet keeps serving, and the compose one-shot fails before the
+// server starts.
 runCompatGate();
 runPrismaMigrations();
 runDataMigrations();
@@ -124,4 +132,12 @@ runDataMigrations();
 // refusing after a contracting migration has already been applied is useless.
 // So the two steps have to sit on opposite sides of the migration. `db stamp`
 // is idempotent, and declines to stamp if the verdict refuses.
+//
+// A `db stamp` failure here (e.g. a transient write error against
+// `app_configs`) aborts this script and wedges the deploy — deliberately.
+// On compose there is no retry (`affine_migration` has no `restart:` policy,
+// and the server gates on `service_completed_successfully`), so a migrated
+// database with no deployment stamp yet leaves the server down until the
+// operator reruns predeploy. That is a fail-closed, accepted availability
+// cost, not an oversight to fix here.
 recordAdoption();
