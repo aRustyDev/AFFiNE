@@ -2015,6 +2015,9 @@ git add packages/backend/server/src/core/db-compat/ && git commit -m "feat(woven
 **Files:**
 
 - Create: `packages/backend/server/src/core/db-compat/render.ts`
+- Create: `packages/backend/server/src/core/db-compat/cli-module.ts`
+- Create: `packages/backend/server/src/core/db-compat/__tests__/render.spec.ts`
+- Modify: `packages/backend/server/src/core/db-compat/index.ts` (one added export)
 - Modify: `packages/backend/server/src/cli.ts`
 - Modify: `scripts/woven-patch-manifest.md` (first row)
 
@@ -2110,6 +2113,17 @@ test('states when identity is unchecked', t => {
   t.regex(text, /identity:\s+not stamped/);
 });
 
+test('a corrupt stamp renders as unreadable, never as "not stamped"', t => {
+  // D18: a stamp row that exists but cannot be parsed refuses rather than being
+  // silently overwritten. Rendering it as "not stamped" would tell the operator
+  // the opposite of what happened.
+  const text = renderReport(
+    report({ verdict: 'IDENTITY_MISMATCH', identity: { kind: 'corrupt' } })
+  );
+  t.regex(text, /identity:\s+PRESENT BUT UNREADABLE/);
+  t.notRegex(text, /not stamped/);
+});
+
 test('a long statement is excerpted and says how much was dropped', t => {
   const long = `ALTER TABLE "t" ${'DROP COLUMN "c", '.repeat(40)}DROP COLUMN "last"`;
   const text = renderReport(
@@ -2183,11 +2197,18 @@ function rollbackLine(report: CompatReport): string {
   return report.rollbackPossible ? 'POSSIBLE' : 'IMPOSSIBLE';
 }
 
+/**
+ * All FIVE `IdentityState` arms. `corrupt` was added in T3 (D18) — a stamp row
+ * that exists but cannot be parsed refuses rather than reading as absent, so it
+ * must render as its own thing and never be confused with "not stamped".
+ */
 function identityLine(report: CompatReport): string {
   const identity = report.identity;
   switch (identity.kind) {
     case 'absent':
       return 'not stamped';
+    case 'corrupt':
+      return 'PRESENT BUT UNREADABLE — refusing rather than overwriting it';
     case 'unchecked':
       return `${identity.stamp.deploymentId} (unchecked — AFFINE_DEPLOYMENT_ID is not set)`;
     case 'match':
@@ -2242,7 +2263,7 @@ export function renderReport(report: CompatReport): string {
 
 Run: `yarn affine @affine/server test src/core/db-compat/__tests__/render.spec.ts`
 
-Expected: PASS, 6 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 5: Add the `renderReport` export to `index.ts`**
 
@@ -2400,23 +2421,51 @@ to claim rollback safety, and it never classifies already-applied migrations.
 
 Run: `yarn workspace @affine/server data-migration db check`
 
-Expected: exit code 0, plus a `ADOPTING pre-existing database (implicit)` warning and a
-`deployment identity minted as <uuid>` warning on the first run only. Confirm the exit code:
+Expected: exit code 0 and **no adoption warnings at all** — `check` writes nothing since D17.
+Confirm the exit code and that the stamp was not created:
 
 ```bash
 yarn workspace @affine/server data-migration db check; echo "exit=$?"
 ```
 
-Run it a second time. Expected: exit 0, and **no** adoption warnings — the stamp now exists, so
-`decide()` returns `adopt: null`. This is the idempotency the initContainer depends on.
+```bash
+docker exec affine_dev_services-postgres-1 psql -U affine -d affine -tAc "SELECT count(*) FROM app_configs WHERE id = '\$deployment';"
+```
+
+Expected: `exit=0` and a count of **0**. A non-zero count means `check` is mutating, which breaks
+its contract.
+
+Now the recording step:
+
+```bash
+yarn workspace @affine/server data-migration db stamp
+```
+
+Expected on the first run: an `ADOPTING pre-existing database (implicit)` warning and a
+`deployment identity minted as <uuid>` warning. Run it a second time — expected: **neither
+warning**, because the stamp exists and `decide()` returns `adopt: null`; only `lastMigratedBy`
+moves. That idempotency is what lets the initContainer call it unconditionally on every deploy.
+
+Verify the id in the log matches the id in the database (D22 — the loser of a concurrent stamp
+used to log an id the database did not hold, and following that log bricked the deployment):
+
+```bash
+docker exec affine_dev_services-postgres-1 psql -U affine -d affine -tAc "SELECT value->>'deploymentId', value->>'adoptionMode' FROM app_configs WHERE id = '\$deployment';"
+```
+
+Clean up so the shared development database is left as you found it:
+
+```bash
+docker exec affine_dev_services-postgres-1 psql -U affine -d affine -c "DELETE FROM app_configs WHERE id = '\$deployment';"
+```
 
 - [ ] **Step 8: Add the `cli.ts` manifest row**
 
 In `scripts/woven-patch-manifest.md`, add a row to the "Diverged upstream-owned files" table:
 
-| File                                 | Category     | Why                                                                                                                                                                                                                                                                                                                                                    | Delete when                                         |
-| ------------------------------------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
-| `packages/backend/server/src/cli.ts` | **ADDITIVE** | Adds a `db` command group (`db status`, `db check`) and a `withMinimalApp` helper that boots a config+prisma-only context, for the `affine-tc6` database-compatibility gate. Pure addition — no existing command or the shared `withCliApp` is touched, so it is low-conflict on upstream merges. Fork-owned logic all lives in `src/core/db-compat/`. | upstream grows its own migration-compatibility gate |
+| File                                 | Category     | Why                                                                                                                                                                                                                                                                                                                                                                | Delete when                                         |
+| ------------------------------------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
+| `packages/backend/server/src/cli.ts` | **ADDITIVE** | Adds a `db` command group (`db status`, `db check`, `db stamp`) and a `withMinimalApp` helper that boots a config+prisma-only context, for the `affine-tc6` database-compatibility gate. Pure addition — no existing command or the shared `withCliApp` is touched, so it is low-conflict on upstream merges. Fork-owned logic all lives in `src/core/db-compat/`. | upstream grows its own migration-compatibility gate |
 
 - [ ] **Step 9: Verify the manifest guard is clean**
 
