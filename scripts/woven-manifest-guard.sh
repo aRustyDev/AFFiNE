@@ -260,13 +260,15 @@ done <<< "$(printf '%s\n' "$ROWS" | grep -v '^!UNPARSED')"
 # destination alongside the source. It used to be the only thing standing
 # between a renamed core patch and an "invisible to outbound" leak — that was
 # true before INBOUND_UNCLEAN existed, and is not true anymore. Today, once
-# the outbound pre-gate consults every inbound verdict (see INBOUND_UNCLEAN
-# and its "Post-review correction" note below), removing `print $4` changes no
-# exit code: a MOVED row whose source is still present trips RESURRECTED; a
-# source genuinely absent from HEAD was present at the baseline, so its own
-# removal is a diff `print $1` alone already puts in LEAKED; and a source
-# absent from both trips OBSOLETE. The pre-gate is what closes the rename
-# hole — this line only makes the report legible once it's already closed.
+# the outbound pre-gate consults every inbound verdict (see the INBOUND_UNCLEAN
+# block below), removing `print $4` changes no exit code: a MOVED row whose
+# source is still present trips RESURRECTED; a source genuinely absent from
+# HEAD was present at the baseline, so its own removal is a diff `print $1`
+# alone already puts in LEAKED; and a source absent from both trips OBSOLETE.
+# The pre-gate is what closes the rename hole — this line only makes the
+# report legible once it's already closed. Full case split:
+# .claude/plans/manifest-deletion-state/DESIGN.md, "Post-review correction:
+# the outbound pre-gate must track every inbound verdict".
 FORKLOCAL="$(printf '%s' "$CLASSIFIED" | awk -F'\t' '
   $2=="FORK-LOCAL CORE PATCH" {
     print $1
