@@ -543,6 +543,16 @@ micromamba run -n affine git commit -m "feat(woven): MOVED rows assert the desti
 
 This is the task that keeps the rename hole shut. Do not skip or reorder it.
 
+**Corrected after Task 7 landed:** it no longer is. A later review proved, by
+exhaustive case split, that once the outbound pre-gate consults every inbound
+verdict via `INBOUND_UNCLEAN` (Task 7), clause 3's `print $4` stops changing
+any exit code — RESURRECTED, LEAKED (via the source path) and OBSOLETE already
+cover every case it used to. Clause 3 is now diagnostic (it names the
+destination in a leak report); `INBOUND_UNCLEAN` is what actually keeps the
+hole shut. See DESIGN.md's "Post-review correction" section for the full case
+split. Still worth doing in its own step below, and still worth the fixture —
+just not for the reason this line originally gave.
+
 _(The fixture numbers below are the original plan's, since collided with the
 pre-existing suite — see the numbering note under File Structure for what
 actually landed: 18–26, plus fixture 27 and 28 added in review.)_

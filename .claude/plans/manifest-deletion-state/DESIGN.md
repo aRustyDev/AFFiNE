@@ -187,6 +187,15 @@ outside `UPSTREAM_OWNED` and outbound goes blind to a fully-present relocated
 patch. The `upstream-leak-guard` design records that failure as _"not
 hypothetical."_ With clause 3, outbound is strictly stronger than it is today.
 
+**Corrected below:** that was true when this section was written, and stopped
+being true once "Post-review correction: the outbound pre-gate must track
+every inbound verdict" landed. Once the pre-gate refuses to judge on
+`INBOUND_UNCLEAN`, `print $4` no longer changes any exit code — RESURRECTED,
+LEAKED (via the source path alone) or OBSOLETE already catch every case clause
+3 used to. What's load-bearing now is the pre-gate; clause 3 only makes the
+leak report name the destination too. See that section below for the case
+split.
+
 The destination needs no row of its own. That keeps it out of `UNDIVERGED`,
 whose branch only runs when a row's path exists, and avoids relaxing the table's
 "upstream-owned" framing.

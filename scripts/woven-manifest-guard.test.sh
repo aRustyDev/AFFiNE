@@ -77,6 +77,25 @@ restore_move() {
   git checkout -- "$OIDC_PATH" 2>/dev/null || true
 }
 
+# commit_scratch_tree: write-tree a scratch index, then commit-tree it with a
+# fixed fixture identity. Shared tail of every plumbing-built fixture commit in
+# this file -- the write-tree/read-tree/update-index steps that precede it vary
+# too much per fixture (cacheinfo-add vs --force-remove vs multi-step) to
+# generalise usefully, so callers keep those themselves and hand this only the
+# finished index, the parent, and the message.
+#
+# The identity comes from the environment, not `git config`: a GitHub runner
+# has no user.name/user.email, and commit-tree then dies with "empty ident
+# name", leaving the caller's *_REF empty and the fixture failing for the
+# wrong reason.
+commit_scratch_tree() {  # $1 = index file, $2 = parent, $3 = message
+  local idx="$1" parent="$2" msg="$3" tree
+  tree="$(GIT_INDEX_FILE="$idx" git write-tree)" || return 1
+  GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
+  GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
+  git commit-tree "$tree" -p "$parent" -m "$msg"
+}
+
 echo "== woven-manifest-guard fixtures =="
 
 # --- 1. known-good tree: 3 upstream-owned diverged files, 3 manifest rows -----
@@ -147,13 +166,7 @@ tmp_index="$TMPDIR_T/index"
 blob="$(printf '// woven guard live-edit fixture\n' | git hash-object -w --stdin)"
 GIT_INDEX_FILE="$tmp_index" git read-tree "$base_ref"
 GIT_INDEX_FILE="$tmp_index" git update-index --add --cacheinfo "100644,$blob,$VICTIM"
-tree="$(GIT_INDEX_FILE="$tmp_index" git write-tree)"
-# The identity comes from the environment, not `git config`: a GitHub runner has
-# no user.name/user.email, and commit-tree then dies with "empty ident name",
-# leaving FIXTURE_REF empty and the fixture failing for the wrong reason.
-FIXTURE_REF="$(GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
-               GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
-               git commit-tree "$tree" -p "$base_ref" -m 'guard live-edit fixture')"
+FIXTURE_REF="$(commit_scratch_tree "$tmp_index" "$base_ref" 'guard live-edit fixture')"
 
 if [ -z "$FIXTURE_REF" ]; then
   bad "could not build the live-edit fixture commit (git commit-tree produced nothing)"
@@ -324,10 +337,7 @@ oidc_blob="$(printf '%s' "$oidc_entry" | awk '{print $3}')"
 GIT_INDEX_FILE="$rn_index" git read-tree HEAD
 GIT_INDEX_FILE="$rn_index" git update-index --force-remove "$OIDC_PATH"
 GIT_INDEX_FILE="$rn_index" git update-index --add --cacheinfo "${oidc_mode},${oidc_blob},${RENAME_PATH}"
-rn_tree="$(GIT_INDEX_FILE="$rn_index" git write-tree)"
-RN_REF="$(GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
-          GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
-          git commit-tree "$rn_tree" -p HEAD -m 'outbound rename fixture: oidc.ts -> oidc-provider.ts, identical content')"
+RN_REF="$(commit_scratch_tree "$rn_index" HEAD 'outbound rename fixture: oidc.ts -> oidc-provider.ts, identical content')"
 
 if [ -z "$RN_REF" ]; then
   bad "could not build the rename fixture commit"
@@ -366,10 +376,7 @@ ob_index="$TMPDIR_T/index.outbound"
 ob_mode_blob="$(git ls-tree HEAD -- "$OB_FILE" | awk '{print $1","$3}')"
 GIT_INDEX_FILE="$ob_index" git read-tree "$OB_BASE"
 GIT_INDEX_FILE="$ob_index" git update-index --add --cacheinfo "${ob_mode_blob},${OB_FILE}"
-ob_tree="$(GIT_INDEX_FILE="$ob_index" git write-tree)"
-OB_REF="$(GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
-          GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
-          git commit-tree "$ob_tree" -p "$OB_BASE" -m 'outbound known-good fixture')"
+OB_REF="$(commit_scratch_tree "$ob_index" "$OB_BASE" 'outbound known-good fixture')"
 
 if [ -z "$OB_REF" ]; then
   bad "could not build the known-good outbound fixture commit"
@@ -599,10 +606,7 @@ oidc_mode_ao="$(printf '%s' "$oidc_entry_ao" | awk '{print $1}')"
 oidc_blob_ao="$(printf '%s' "$oidc_entry_ao" | awk '{print $3}')"
 GIT_INDEX_FILE="$addonly_index" git read-tree "$OB_BASE"
 GIT_INDEX_FILE="$addonly_index" git update-index --add --cacheinfo "${oidc_mode_ao},${oidc_blob_ao},${MOVED_DEST}"
-addonly_tree="$(GIT_INDEX_FILE="$addonly_index" git write-tree)"
-ADDONLY_REF="$(GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
-               GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
-               git commit-tree "$addonly_tree" -p "$OB_BASE" -m 'outbound add-only relocation fixture: FORK-LOCAL content lands only at the MOVED destination')"
+ADDONLY_REF="$(commit_scratch_tree "$addonly_index" "$OB_BASE" 'outbound add-only relocation fixture: FORK-LOCAL content lands only at the MOVED destination')"
 
 if [ -z "$ADDONLY_REF" ]; then
   bad "could not build the add-only relocation fixture commit"
@@ -663,10 +667,7 @@ GIT_INDEX_FILE="$typo_index" git read-tree "$OB_BASE"
 # The content lands at the REAL destination ($MOVED_DEST) -- the manifest cell
 # below names a DIFFERENT (typo'd) path, so the two never match.
 GIT_INDEX_FILE="$typo_index" git update-index --add --cacheinfo "${oidc_mode_typo},${oidc_blob_typo},${MOVED_DEST}"
-typo_tree="$(GIT_INDEX_FILE="$typo_index" git write-tree)"
-TYPO_REF="$(GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
-            GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
-            git commit-tree "$typo_tree" -p "$OB_BASE" -m 'outbound typo-destination fixture: manifest MOVED cell does not match where the content actually landed')"
+TYPO_REF="$(commit_scratch_tree "$typo_index" "$OB_BASE" 'outbound typo-destination fixture: manifest MOVED cell does not match where the content actually landed')"
 
 if [ -z "$TYPO_REF" ]; then
   bad "could not build the typo-destination fixture commit"
@@ -704,10 +705,7 @@ mark_removed "$OIDC_PATH" "$TMPDIR_T/m-removed-oidc-ob.md"
 rm29_index="$TMPDIR_T/index.rm29"
 GIT_INDEX_FILE="$rm29_index" git read-tree "$OB_BASE"
 GIT_INDEX_FILE="$rm29_index" git update-index --force-remove "$OIDC_PATH"
-rm29_tree="$(GIT_INDEX_FILE="$rm29_index" git write-tree)"
-RM29_REF="$(GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
-            GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
-            git commit-tree "$rm29_tree" -p "$OB_BASE" -m 'outbound REMOVED fork-local fixture: delete oidc.ts')"
+RM29_REF="$(commit_scratch_tree "$rm29_index" "$OB_BASE" 'outbound REMOVED fork-local fixture: delete oidc.ts')"
 
 if [ -z "$RM29_REF" ]; then
   bad "could not build the REMOVED-fork-local fixture commit"
@@ -756,10 +754,7 @@ mark_removed "$SEED_PATH" "$TMPDIR_T/m-removed-seed-ob.md"
 rm30_index="$TMPDIR_T/index.rm30"
 GIT_INDEX_FILE="$rm30_index" git read-tree "$OB_BASE"
 GIT_INDEX_FILE="$rm30_index" git update-index --force-remove "$SEED_PATH"
-rm30_tree="$(GIT_INDEX_FILE="$rm30_index" git write-tree)"
-RM30_REF="$(GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
-            GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
-            git commit-tree "$rm30_tree" -p "$OB_BASE" -m 'outbound REMOVED additive fixture: delete seed/index.ts')"
+RM30_REF="$(commit_scratch_tree "$rm30_index" "$OB_BASE" 'outbound REMOVED additive fixture: delete seed/index.ts')"
 
 if [ -z "$RM30_REF" ]; then
   bad "could not build the REMOVED-additive fixture commit"

@@ -254,8 +254,19 @@ done <<< "$(printf '%s\n' "$ROWS" | grep -v '^!UNPARSED')"
 #
 # Clause 3 (affine-83p): a MOVED row's DESTINATION joins the set. The
 # destination did not exist at the baseline, so it is fork-owned and falls
-# outside UPSTREAM_OWNED entirely — without this line a renamed core patch is
-# fully present in the tree and invisible to the outbound check.
+# outside UPSTREAM_OWNED entirely.
+#
+# This is diagnostic, not the gate: it makes a leak report NAME the
+# destination alongside the source. It used to be the only thing standing
+# between a renamed core patch and an "invisible to outbound" leak — that was
+# true before INBOUND_UNCLEAN existed, and is not true anymore. Today, once
+# the outbound pre-gate consults every inbound verdict (see INBOUND_UNCLEAN
+# and its "Post-review correction" note below), removing `print $4` changes no
+# exit code: a MOVED row whose source is still present trips RESURRECTED; a
+# source genuinely absent from HEAD was present at the baseline, so its own
+# removal is a diff `print $1` alone already puts in LEAKED; and a source
+# absent from both trips OBSOLETE. The pre-gate is what closes the rename
+# hole — this line only makes the report legible once it's already closed.
 FORKLOCAL="$(printf '%s' "$CLASSIFIED" | awk -F'\t' '
   $2=="FORK-LOCAL CORE PATCH" {
     print $1
