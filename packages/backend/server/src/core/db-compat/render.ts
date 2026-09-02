@@ -58,12 +58,59 @@ function identityLine(report: CompatReport): string {
   }
 }
 
-export function renderReport(report: CompatReport): string {
+/**
+ * `migrations applied:` is `applied.length` in the common case, but a
+ * `MIGRATION_FAILED` report's half-applied migration appears in BOTH
+ * `applied` (not rolled back) and `failed` (not finished) — see the doc on
+ * `CompatReport.known`/`applied` in `compat.ts`. Printing a bare count would
+ * read as "N migrations cleanly applied", which is false for that one; say so
+ * explicitly rather than let the same name appear twice with no explanation.
+ */
+function appliedLine(report: CompatReport): string {
+  if (report.failed.length > 0) {
+    return `${report.applied.length} (${report.failed.length} unfinished)`;
+  }
+  return `${report.applied.length}`;
+}
+
+export interface RenderReportOptions {
+  /**
+   * Collapse the `pending` list to a bare count instead of every migration's
+   * tier and DDL hits. Intended for `db check` on a decision that is `ok` and
+   * `VIRGIN`: a fresh install has every migration pending — 117 of them, many
+   * BLOCKING — and full detail there is 261 lines of noise on the one path
+   * that is unambiguously safe, drowning the initContainer log on the run
+   * where it matters least. `db status` and every refusal keep full detail,
+   * where it is the evidence an operator needs.
+   */
+  summarizePending?: boolean;
+}
+
+export function renderReport(
+  report: CompatReport,
+  options: RenderReportOptions = {}
+): string {
+  // `UNREADABLE` means the migration set itself could not be loaded: `known`
+  // is `[]`, which makes `ahead` (computed as "applied but not known")
+  // contain EVERY applied migration. Rendered plainly that reads as "this
+  // database was migrated by a far newer binary" — the opposite of the truth,
+  // "this binary could not find its own migrations directory". See the doc on
+  // `CompatReport.known` in `compat.ts`: a renderer must suppress these lists
+  // for this verdict rather than print them.
+  if (report.verdict === 'UNREADABLE') {
+    return [
+      `verdict:                  ${report.verdict}`,
+      `reason:                   ${report.reason}`,
+      `migrations known:         unknown (migration set could not be read)`,
+      `identity:                 ${identityLine(report)}`,
+    ].join('\n');
+  }
+
   const lines: string[] = [
     `verdict:                  ${report.verdict}`,
     `reason:                   ${report.reason}`,
     `migrations known:         ${report.known.length}`,
-    `migrations applied:       ${report.applied.length}`,
+    `migrations applied:       ${appliedLine(report)}`,
     `identity:                 ${identityLine(report)}`,
     `rollback after applying:  ${rollbackLine(report)}`,
   ];
@@ -87,10 +134,14 @@ export function renderReport(report: CompatReport): string {
 
   if (report.pending.length > 0) {
     lines.push('', `pending (${report.pending.length}):`);
-    for (const item of report.pending) {
-      lines.push(`  ${item.tier.padEnd(11)} ${item.name}`);
-      for (const hit of item.hits) {
-        lines.push(`    L${hit.line} ${hit.rule}: ${excerpt(hit.statement)}`);
+    if (options.summarizePending) {
+      lines.push('  detail omitted — pass without summarizePending to see it');
+    } else {
+      for (const item of report.pending) {
+        lines.push(`  ${item.tier.padEnd(11)} ${item.name}`);
+        for (const hit of item.hits) {
+          lines.push(`    L${hit.line} ${hit.rule}: ${excerpt(hit.statement)}`);
+        }
       }
     }
   }

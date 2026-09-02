@@ -32,10 +32,17 @@ async function withCliApp(
 
 async function withMinimalApp(
   logger: Logger,
-  callback: (app: INestApplicationContext) => Promise<void>
+  callback: (app: INestApplicationContext) => Promise<void>,
+  options: { silent?: boolean } = {}
 ) {
+  // Nest's `ConsoleLogger` routes `log`/`warn` to stdout (only `error` goes to
+  // stderr), with ANSI escapes — interleaved with `--json`'s payload on the
+  // same stream, that makes `db status --json | jq .` fail to parse. `false`
+  // disables the logger entirely rather than swapping in a custom one, since
+  // that's the only thing `--json` needs; the human-readable paths keep the
+  // normal logger untouched.
   const app = await NestFactory.createApplicationContext(DbCompatCliModule, {
-    logger,
+    logger: options.silent ? false : logger,
   });
 
   try {
@@ -101,16 +108,48 @@ function buildProgram(logger: Logger) {
     )
     .option('--json', 'emit the raw report as JSON')
     .action(async (options: { json?: boolean }) => {
-      await withMinimalApp(logger, async app => {
-        const report = await app.get(DbCompatService).report();
-        // Written to stdout, not the logger: this is a report an operator reads
-        // or a machine parses, not a log line.
-        process.stdout.write(
-          (options.json
-            ? JSON.stringify(report, null, 2)
-            : renderReport(report)) + '\n'
-        );
-      });
+      await withMinimalApp(
+        logger,
+        async app => {
+          // `status` is the diagnostic an operator reaches for when something
+          // is ALREADY wrong, so it must never itself fail to produce a
+          // report — the same reasoning `compat.ts` uses to swallow a
+          // `migrations.sql()` throw. The Nest context above already
+          // initialized (Prisma connects lazily), so a dead database surfaces
+          // as a thrown `PrismaClientInitializationError` right here, not
+          // during `withMinimalApp`'s setup — this catch reliably reaches it.
+          try {
+            const report = await app.get(DbCompatService).report();
+            // Written to stdout, not the logger: this is a report an
+            // operator reads or a machine parses, not a log line.
+            process.stdout.write(
+              (options.json
+                ? JSON.stringify(report, null, 2)
+                : renderReport(report)) + '\n'
+            );
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            // Prisma's own error messages are multi-line; collapse to one
+            // line for the human report so `reason:` keeps the same shape
+            // renderReport() uses everywhere else. The JSON payload keeps the
+            // message verbatim — a machine consumer doesn't care about line
+            // breaks, and full text is more useful there.
+            const oneLine = message.replace(/\s+/g, ' ').trim();
+            process.stdout.write(
+              (options.json
+                ? JSON.stringify({ verdict: 'UNREACHABLE', error: message })
+                : `verdict:                  UNREACHABLE\nreason:                   ${oneLine}`) +
+                '\n'
+            );
+            logger.error(
+              `db status could not reach the database: ${message}`,
+              error instanceof Error ? error.stack : undefined
+            );
+          }
+        },
+        { silent: options.json === true }
+      );
     });
 
   dbCommand
@@ -128,7 +167,17 @@ function buildProgram(logger: Logger) {
           .get(DbCompatService)
           .check({ adopt: options.adopt });
 
-        process.stdout.write(renderReport(decision.report) + '\n');
+        // A fresh VIRGIN install has every migration pending, several
+        // BLOCKING — full detail there is 261 lines of noise in an
+        // initContainer log on the one path that is unambiguously safe.
+        // Every refusal, and DB_BEHIND, keep full detail: there it is the
+        // evidence an operator needs.
+        process.stdout.write(
+          renderReport(decision.report, {
+            summarizePending:
+              decision.ok && decision.report.verdict === 'VIRGIN',
+          }) + '\n'
+        );
 
         if (!decision.ok) {
           logger.error(
