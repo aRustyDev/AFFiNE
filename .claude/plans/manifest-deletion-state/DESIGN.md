@@ -146,6 +146,16 @@ That is the acceptance criterion discharged directly: the message distinguishes
 "absent because this branch deleted it" from "absent because upstream deleted
 it", and neither prescription produces the opposite failure.
 
+One window remains where "drop the row, or repoint it" is only conditionally
+safe: `UPSTREAM_OWNED` is computed from baseline existence, so until
+`scripts/woven-upstream-baseline` is re-pointed past the upstream deletion, the
+path is still in the baseline and dropping the row bounces to `UNMANIFESTED`.
+The merge checklist already sequences the baseline re-point before the guard
+is consulted, so a finished merge commit — the only thing CI ever sees — never
+lands in this window; it is reachable only by hand, mid-merge. The message now
+says so explicitly, and even there it is self-correcting: `UNMANIFESTED`'s own
+message says exactly what is still missing.
+
 ### Why the deadlock breaks
 
 `MANIFESTED` still contains a REMOVED row's path, so `comm -23` never sees it

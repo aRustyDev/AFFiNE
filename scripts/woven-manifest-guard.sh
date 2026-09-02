@@ -433,8 +433,11 @@ if [ "$OUTBOUND" -eq 1 ]; then
       while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$STALE"
       err ""
       err "  A stale row's category no longer describes this tree. If upstream deleted or"
-      err "  renamed the file, drop or repoint the row; if THIS BRANCH deleted it, set the"
-      err "  row's State to REMOVED (or MOVED \`new/path\`) and run again."
+      err "  renamed the file, re-point scripts/woven-upstream-baseline per the merge"
+      err "  checklist first, then drop or repoint the row — until the baseline moves, the"
+      err "  path is still upstream-owned and dropping the row only trades this failure"
+      err "  for UNMANIFESTED. If THIS BRANCH deleted it instead, set the row's State to"
+      err "  REMOVED (or MOVED \`new/path\`) and run again."
     fi
     exit 1
   fi
@@ -486,6 +489,9 @@ if [ -n "$STALE" ]; then
   while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$STALE"
   err "  Two causes, two different fixes:"
   err "    * upstream deleted or renamed it  -> drop the row, or repoint it at the new path"
+  err "      (re-point scripts/woven-upstream-baseline first, per the merge checklist —"
+  err "      until then the path is still in the baseline, and dropping the row only"
+  err "      trades this failure for UNMANIFESTED)"
   err "    * THIS BRANCH deleted it          -> keep the row and set State to REMOVED"
   err "      (a rename: State = MOVED \`new/path\`)"
 fi
