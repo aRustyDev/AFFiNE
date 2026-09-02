@@ -558,6 +558,55 @@ else
   trap 'rm -rf "$TMPDIR_T"' EXIT
 fi
 
+# --- 27. the realistic exploit shape: an upstream-directed branch built ------
+#         FROM the baseline that only ADDS the relocated FORK-LOCAL file ------
+# Fixture 26 renames on top of the current branch, so the SOURCE path's own
+# absence is enough on its own to trip outbound (LEAKED catches it via the
+# source, same as fixture 16's rename-hiding case) -- rc 1 there does not by
+# itself prove clause 3 is doing anything; only its expect_names on the
+# destination does. This fixture is the shape a reviewer actually used to
+# demonstrate the leak end to end: a branch cut FROM the upstream baseline --
+# the shape scripts/woven-upstream-branch.sh builds, same as fixture 17 -- that
+# never touches the source path at all. It only ADDS the fork-local file's
+# CONTENT at its NEW, fork-owned address. The source path is therefore
+# byte-identical to the baseline and never appears in CHANGED, so
+# UPSTREAM_OWNED is 0 -- and pre-clause-3, LEAKED (comm -12 CHANGED FORKLOCAL)
+# is empty too, so the guard printed "no FORK-LOCAL CORE PATCH ... safe to
+# send upstream" at rc 0: a full, undegraded pass. Built with plumbing against
+# a scratch index seeded from the baseline, exactly like fixture 17, so no
+# branch, index or working tree is touched -- no git-mv, so none of the
+# stranded-tree hazard fixtures 23-26 have to guard against.
+echo "-- outbound: an upstream-baseline branch that only ADDS the relocated FORK-LOCAL file"
+mark_moved "$OIDC_PATH" "$MOVED_DEST" "$TMPDIR_T/m-moved-addonly.md"
+addonly_index="$TMPDIR_T/index.addonly"
+oidc_entry_ao="$(git ls-tree HEAD -- "$OIDC_PATH")"
+oidc_mode_ao="$(printf '%s' "$oidc_entry_ao" | awk '{print $1}')"
+oidc_blob_ao="$(printf '%s' "$oidc_entry_ao" | awk '{print $3}')"
+GIT_INDEX_FILE="$addonly_index" git read-tree "$OB_BASE"
+GIT_INDEX_FILE="$addonly_index" git update-index --add --cacheinfo "${oidc_mode_ao},${oidc_blob_ao},${MOVED_DEST}"
+addonly_tree="$(GIT_INDEX_FILE="$addonly_index" git write-tree)"
+ADDONLY_REF="$(GIT_AUTHOR_NAME='woven-guard-fixture'    GIT_AUTHOR_EMAIL='fixture@woven.invalid' \
+               GIT_COMMITTER_NAME='woven-guard-fixture' GIT_COMMITTER_EMAIL='fixture@woven.invalid' \
+               git commit-tree "$addonly_tree" -p "$OB_BASE" -m 'outbound add-only relocation fixture: FORK-LOCAL content lands only at the MOVED destination')"
+
+if [ -z "$ADDONLY_REF" ]; then
+  bad "could not build the add-only relocation fixture commit"
+else
+  run_guard --outbound --base "$OB_BASE" --head "$ADDONLY_REF" --manifest "$TMPDIR_T/m-moved-addonly.md"
+  expect_rc 1 "policy violation"
+  expect_names "$MOVED_DEST"
+
+  # Pin the SHAPE, not just the outcome: this must be the degenerate
+  # "0 upstream-owned" case the reviewer demonstrated, not some other reason
+  # the guard happens to fail -- otherwise a guard that just always failed
+  # here would satisfy the fixture without clause 3 doing anything.
+  if grep -qF -- "1 changed vs baseline · 0 upstream-owned" "$OUT"; then
+    ok "fixture commit really is baseline + one fork-owned addition (0 upstream-owned)"
+  else
+    bad "fixture commit does not match the intended add-only shape"; dump
+  fi
+fi
+
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]
