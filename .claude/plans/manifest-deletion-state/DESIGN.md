@@ -245,6 +245,14 @@ case vacuously.
 Fixture 8 is the one that matters most: it is the only test that proves the
 rename hole of clause 3 stayed shut. Fixture 10 is the migration guarantee.
 
+**Corrected below:** same stale framing as "Renames" above — see "Post-review
+correction: the outbound pre-gate must track every inbound verdict". What
+fixture 8 actually pins is that `FORKLOCAL`'s clause 3 still names the
+destination in the leak report; the rename hole itself is kept shut by
+`INBOUND_UNCLEAN`, not by this fixture. As landed, fixture 8 is fixture 26 in
+`scripts/woven-manifest-guard.test.sh` (this table keeps the original plan's
+numbering — see the numbering note under File Structure).
+
 ## Non-goals
 
 - The outbound `STALE` gate is untouched. The bead forbids resolving this by

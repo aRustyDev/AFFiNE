@@ -538,11 +538,18 @@ else
 fi
 
 # --- 26. clause 3: outbound sees a FORK-LOCAL patch at its NEW address -------
-# Without this, fixing the deadlock reintroduces the very leak --no-renames
-# exists to prevent: the rename reaches green, the destination is fork-owned
-# (absent at the baseline) and so falls outside UPSTREAM_OWNED, and outbound
-# goes blind to a fully-present relocated core patch. This fixture is the only
-# thing standing between the affine-83p fix and that regression.
+# Pins what clause 3 (`FORKLOCAL`'s `if ($3=="MOVED" && $4!="") print $4`)
+# actually does today: names the destination in the leak report. It does NOT
+# gate this fixture's exit code — INBOUND_UNCLEAN does that, by refusing to
+# judge whenever a MOVED row's tree correspondence is broken, and here it
+# isn't (source gone, destination present), so the pre-gate clears and the
+# leak check runs. Without clause 3, this fixture still exits 1 (RESURRECTED/
+# LEAKED/OBSOLETE already cover every case per the comment on FORKLOCAL in
+# scripts/woven-manifest-guard.sh and DESIGN.md's "Post-review correction"
+# section) — it would just stop naming $MOVED_DEST, reporting only the source
+# path instead. That's what this fixture actually catches: a clause-3
+# regression that silently drops the destination from the report, not a
+# reopened leak.
 #
 # Same hardened precondition as fixtures 23-25: require the source to
 # literally exist (not just `git diff --quiet`, which a tree stranded by a
