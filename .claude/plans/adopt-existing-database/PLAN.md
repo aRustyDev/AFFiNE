@@ -2502,10 +2502,17 @@ import test from 'ava';
 import type { CompatDecision } from '../service';
 import { enforce } from '../guard';
 
-const decision = (ok: boolean, verdict = 'DB_AHEAD'): CompatDecision => ({
+// `bootMayContinue` is the field the guard keys on (D20). It is true for every
+// `ok` decision and, uniquely among refusals, for UNREADABLE.
+const decision = (
+  ok: boolean,
+  verdict = 'DB_AHEAD',
+  bootMayContinue = ok
+): CompatDecision => ({
   ok,
   refusal: ok ? null : 'the database was migrated by a NEWER binary',
   adopt: null,
+  bootMayContinue,
   report: {
     verdict: verdict as never,
     reason: 'r',
@@ -2544,9 +2551,25 @@ test('a refusing decision throws, so the port is never bound', t => {
 test('UNREADABLE at boot logs an error but does NOT throw (design D9)', t => {
   const { logger, errors } = collect();
   t.notThrows(() =>
-    enforce(decision(false, 'UNREADABLE'), { bypassed: false, logger })
+    enforce(decision(false, 'UNREADABLE', true), { bypassed: false, logger })
   );
   t.true(errors.some(m => /UNREADABLE/.test(m)));
+});
+
+test('the guard keys on bootMayContinue, not on the verdict string (D20)', t => {
+  // If a future verdict is given boot-continue semantics, the guard must honour
+  // it without being edited. Conversely a refusal with bootMayContinue false
+  // must throw even if someone mislabels the verdict.
+  const { logger } = collect();
+  t.notThrows(() =>
+    enforce(decision(false, 'SOME_FUTURE_VERDICT', true), {
+      bypassed: false,
+      logger,
+    })
+  );
+  t.throws(() =>
+    enforce(decision(false, 'UNREADABLE', false), { bypassed: false, logger })
+  );
 });
 
 test('the bypass suppresses the throw and logs at ERROR every time', t => {
@@ -2588,10 +2611,13 @@ export class DatabaseIncompatibleError extends Error {
 /**
  * Pure enforcement, separated so it is testable without booting Nest.
  *
- * UNREADABLE is deliberately asymmetric with the predeploy gate: refusing to
- * BOOT over a packaging fault would take the fleet down for a non-safety
- * reason, and because the migration initContainer shares this pod and image,
- * the gate has already refused in that case. See design D9.
+ * Keys on `decision.bootMayContinue` (D20), NOT on the verdict string. The
+ * asymmetry it encodes: refusing to BOOT over a packaging fault would take the
+ * fleet down for a non-safety reason, and because the migration initContainer
+ * shares this pod and image, the predeploy gate has already refused in that
+ * case (D9). Putting that judgement in a named field rather than a verdict
+ * comparison means a future verdict inherits the right behaviour instead of
+ * silently falling into "throw".
  */
 export function enforce(
   decision: CompatDecision,
@@ -2603,10 +2629,11 @@ export function enforce(
     return;
   }
 
-  if (report.verdict === 'UNREADABLE') {
+  if (decision.bootMayContinue) {
     context.logger.error(
-      `database compatibility is UNREADABLE — could not verify this binary against the database. ` +
-        `Continuing, because "cannot verify" is not "verified bad". Reason: ${report.reason}`
+      `database compatibility could not be verified (${report.verdict}) — ` +
+        `continuing, because "cannot verify" is not "verified bad". ` +
+        `Reason: ${report.reason}`
     );
     return;
   }
@@ -2640,8 +2667,10 @@ export class DbCompatGuard implements OnApplicationBootstrap {
       return;
     }
 
-    // Read-only: adoption is the predeploy gate's job, never the server's.
-    const decision = await this.service.check({ mutate: false });
+    // `check()` is pure since D17 — it writes nothing. Recording adoption is
+    // `db stamp`'s job, run by the predeploy script after migrations; the
+    // server must never stamp.
+    const decision = await this.service.check();
 
     enforce(decision, { bypassed: bootGuardBypassed(), logger: this.logger });
   }
@@ -2672,7 +2701,7 @@ export class DbCompatGuardModule {}
 
 Run: `yarn affine @affine/server test src/core/db-compat/__tests__/guard.spec.ts`
 
-Expected: PASS, 4 tests.
+Expected: PASS, 5 tests.
 
 - [ ] **Step 6: Wire `DbCompatGuardModule` into `AppModule`**
 
