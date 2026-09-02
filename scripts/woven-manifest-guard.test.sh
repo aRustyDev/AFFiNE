@@ -59,13 +59,13 @@ MOVED_DEST="packages/backend/server/src/plugins/oauth/providers/woven-oidc.ts"
 
 mark_removed() {  # $1 = path to mark, $2 = output manifest
   awk -v p="$1" '
-    $0 ~ p && /^\|/ { sub(/[[:space:]]*\|[[:space:]]*$/, " | **REMOVED** |"); }
+    $0 ~ p && /^\|/ { sub(/\|[[:space:]]*\|[[:space:]]*$/, "| **REMOVED** |"); }
     { print }
   ' "$MANIFEST" >"$2"
 }
 mark_moved() {  # $1 = source, $2 = destination, $3 = output manifest
   awk -v p="$1" -v dst="$2" '
-    $0 ~ p && /^\|/ { sub(/[[:space:]]*\|[[:space:]]*$/, " | **MOVED** `" dst "` |"); }
+    $0 ~ p && /^\|/ { sub(/\|[[:space:]]*\|[[:space:]]*$/, "| **MOVED** `" dst "` |"); }
     { print }
   ' "$MANIFEST" >"$3"
 }
@@ -401,7 +401,7 @@ fi
 # is the deadlock this whole change exists to remove.
 echo "-- fail closed: State=REMOVEDD is rejected, not guessed"
 awk -v p="$OIDC_PATH" '
-  $0 ~ p && /^\|/ { sub(/[[:space:]]*\|[[:space:]]*$/, " | **REMOVEDD** |"); }
+  $0 ~ p && /^\|/ { sub(/\|[[:space:]]*\|[[:space:]]*$/, "| **REMOVEDD** |"); }
   { print }
 ' "$MANIFEST" >"$TMPDIR_T/m-badstate.md"
 run_guard --manifest "$TMPDIR_T/m-badstate.md"
@@ -454,7 +454,7 @@ awk -v p="$OIDC_PATH" -v ghost="$GHOST_REMOVED" '
   }
 ' "$MANIFEST" >"$TMPDIR_T/m-obs-1.md"
 awk -v p="$GHOST_REMOVED" '
-  $0 ~ p && /^\|/ { sub(/[[:space:]]*\|[[:space:]]*$/, " | **REMOVED** |"); }
+  $0 ~ p && /^\|/ { sub(/\|[[:space:]]*\|[[:space:]]*$/, "| **REMOVED** |"); }
   { print }
 ' "$TMPDIR_T/m-obs-1.md" >"$TMPDIR_T/m-obsolete.md"
 run_guard --manifest "$TMPDIR_T/m-obsolete.md" --head HEAD
@@ -785,6 +785,49 @@ else
   else
     ok "oidc.ts never entered CHANGED (left byte-identical to the baseline)"
   fi
+fi
+
+# --- 31. a manifest with NO State column still parses as all-PRESENT ---------
+# The migration guarantee: State is appended, absent means PRESENT, and PRESENT
+# is the pre-affine-83p behaviour. Built by hand at four columns so it cannot
+# drift when the live manifest gains its fifth.
+echo "-- compat: four-column manifest behaves exactly as before"
+{
+  echo '## Diverged upstream-owned files'
+  echo
+  echo '| File | Category | Why | Delete when |'
+  echo '| ---- | -------- | --- | ----------- |'
+  echo "| \`$OIDC_PATH\` | **FORK-LOCAL CORE PATCH** | x | y |"
+  echo "| \`$SEED_PATH\` | **ADDITIVE** | x | y |"
+  echo '| `.github/workflows/build-test.yml` | **ADDITIVE** | x | y |'
+} >"$TMPDIR_T/m-fourcol.md"
+run_guard --manifest "$TMPDIR_T/m-fourcol.md" --head HEAD
+expect_rc 0 "four-column manifest is clean"
+
+# expect_rc 0 alone is weak: it would also pass if the hand-built manifest
+# silently failed to parse and produced zero rows (an empty MANIFESTED list is
+# only a WARNING inbound, not a failure -- see check 1 above), or if the three
+# rows were misread into the wrong category. Pin the SHAPE too, the same way
+# fixtures #12 and #17 do: the guard's own row count, and --dump-rows's actual
+# per-row classification.
+if grep -qF -- "3 manifest row(s)" "$OUT"; then
+  ok "four-column manifest parsed all 3 rows, not silently zero"
+else
+  bad "guard did not report 3 manifest rows for the four-column manifest"; dump
+fi
+
+run_guard --dump-rows --manifest "$TMPDIR_T/m-fourcol.md"
+expect_rc 0 "dump-rows on the four-column manifest"
+FOURCOL_DUMP="$(grep -F "$(printf '\t')" "$OUT" | sort)"
+EXPECT_FOURCOL_DUMP="$(printf '%s\n' \
+  "$OIDC_PATH"$'\t'"FORK-LOCAL CORE PATCH"$'\t'"PRESENT"$'\t' \
+  ".github/workflows/build-test.yml"$'\t'"ADDITIVE"$'\t'"PRESENT"$'\t' \
+  "$SEED_PATH"$'\t'"ADDITIVE"$'\t'"PRESENT"$'\t' | sort)"
+if [ "$FOURCOL_DUMP" = "$EXPECT_FOURCOL_DUMP" ]; then
+  ok "dump-rows shows all 3 rows as PRESENT with an empty destination -- the absent fifth column defaults correctly"
+else
+  bad "dump-rows output for the four-column manifest does not match the expected all-PRESENT pairing"
+  dump
 fi
 
 echo
