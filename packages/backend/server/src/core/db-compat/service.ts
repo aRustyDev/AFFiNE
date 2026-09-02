@@ -1,18 +1,20 @@
 import { randomUUID } from 'node:crypto';
 
 import { Injectable, Logger } from '@nestjs/common';
-import { PrismaClient } from '@prisma/client';
+import { type Prisma, PrismaClient } from '@prisma/client';
 
 import { buildReport, type CompatReport, type Verdict } from './compat';
 import { readDbState } from './db-state';
 import { adoptRequested, buildRef, configuredDeploymentId } from './env';
 import {
   type AdoptionMode,
+  DEPLOYMENT_STAMP_ID,
   type DeploymentStamp,
   readStamp,
   writeStamp,
 } from './identity';
 import { loadMigrationSet } from './migration-set';
+import { isUndefinedTable, isUniqueViolation } from './prisma-errors';
 
 export interface CompatDecision {
   report: CompatReport;
@@ -227,7 +229,9 @@ export class DbCompatService {
    * migrations, once `app_configs` is guaranteed to exist:
    *
    * - No stamp yet: records the adoption `check()` would decide (fresh
-   *   install, implicit, or explicit).
+   *   install, implicit, or explicit) — first-writer-wins if a concurrent
+   *   `db stamp` (a second pod's initContainer) races to do the same
+   *   thing, see `recordAdoption`.
    * - Already stamped: updates ONLY `lastMigratedBy` — `adoptedAt` and
    *   `adoptionMode` describe the ORIGINAL adoption and must never be
    *   overwritten by a later migration run.
@@ -236,10 +240,17 @@ export class DbCompatService {
    *   returns — by the time this runs, migrations may already have applied,
    *   so there is no meaningful "abort" left to perform here; the refusal
    *   that matters is the one `check()` raised before migrations ran.
+   *
+   * Minor 5: `options.adopt` mirrors `check()`'s contract, so an operator's
+   * explicit `db check --adopt` consent can be threaded through to `db
+   * stamp --adopt` as well and recorded as `explicit` rather than losing
+   * that record by falling back to `implicit`.
    */
-  async stamp(): Promise<void> {
+  async stamp(options: { adopt?: boolean } = {}): Promise<void> {
     const report = await this.report();
-    const decision = decide(report, { adopt: adoptRequested() });
+    const decision = decide(report, {
+      adopt: options.adopt === true || adoptRequested(),
+    });
 
     if (!decision.ok) {
       this.logger.error(
@@ -268,37 +279,101 @@ export class DbCompatService {
     });
   }
 
+  /**
+   * Important 2. Two pods can both run `db stamp` against the same
+   * unstamped database (a fresh install with `replicas: 2`, each pod's own
+   * initContainer) and both reach this method with `AFFINE_DEPLOYMENT_ID`
+   * unset — the day-one default the design explicitly supports — minting
+   * their OWN `randomUUID()`. Under a plain `upsert()`, the second writer
+   * silently clobbers the first, and the LOSER has already logged
+   * "set AFFINE_DEPLOYMENT_ID=<its own minted id>" while the database ends
+   * up holding the OTHER pod's id — an operator who follows that
+   * instruction gets `IDENTITY_MISMATCH` and a server that refuses to
+   * boot.
+   *
+   * Fixed first-writer-wins: `create()` rather than `upsert()`. On a
+   * unique-violation (`P2002`, someone else's row landed first), re-read
+   * and report the PERSISTED stamp — never the one this call minted — since
+   * that is the id an operator actually needs to see.
+   */
   private async recordAdoption(mode: AdoptionMode): Promise<void> {
     const configured = configuredDeploymentId();
-    const deploymentId = configured ?? randomUUID();
+    const mintedId = configured ?? randomUUID();
     const ref = buildRef();
     const now = new Date().toISOString();
 
-    const stamp: DeploymentStamp = {
-      deploymentId,
+    const attempted: DeploymentStamp = {
+      deploymentId: mintedId,
       adoptedAt: now,
       adoptionMode: mode,
       adoptedBy: ref,
       lastMigratedBy: { ...ref, at: now },
     };
 
-    await writeStamp(this.db, stamp);
+    const { stamp: persisted, won } =
+      await this.createStampFirstWriterWins(attempted);
+
+    if (!won) {
+      // The database now holds SOMEONE ELSE's stamp, not the one minted
+      // above. Refresh only `lastMigratedBy` on it — exactly the
+      // already-adopted path — and log the id that is ACTUALLY persisted.
+      await this.touchLastMigratedBy(persisted);
+      this.logger.warn(
+        `lost a concurrent deployment-stamp write; this database is adopted as ` +
+          `${persisted.deploymentId} (${persisted.adoptionMode}), not the id this ` +
+          `instance minted`
+      );
+      return;
+    }
 
     if (mode === 'fresh-install') {
       this.logger.log(
-        `initialized a fresh database as deployment ${deploymentId}`
+        `initialized a fresh database as deployment ${persisted.deploymentId}`
       );
     } else {
       this.logger.warn(
-        `ADOPTING pre-existing database (${mode}) as deployment ${deploymentId}`
+        `ADOPTING pre-existing database (${mode}) as deployment ${persisted.deploymentId}`
       );
     }
 
     if (!configured) {
       this.logger.warn(
-        `deployment identity minted as ${deploymentId}; set AFFINE_DEPLOYMENT_ID=${deploymentId} ` +
-          `to enable wrong-database detection`
+        `deployment identity minted as ${persisted.deploymentId}; set ` +
+          `AFFINE_DEPLOYMENT_ID=${persisted.deploymentId} to enable wrong-database detection`
       );
+    }
+  }
+
+  private async createStampFirstWriterWins(
+    stamp: DeploymentStamp
+  ): Promise<{ stamp: DeploymentStamp; won: boolean }> {
+    const value = stamp as unknown as Prisma.InputJsonValue;
+    try {
+      await this.db.appConfig.create({
+        data: { id: DEPLOYMENT_STAMP_ID, value },
+      });
+      return { stamp, won: true };
+    } catch (error) {
+      if (isUndefinedTable(error)) {
+        throw new Error(
+          'DbCompatService.stamp() was called before app_configs exists. This ' +
+            'is a caller bug: the deployment stamp can only be recorded after ' +
+            '`prisma migrate deploy` has run.',
+          { cause: error }
+        );
+      }
+      if (!isUniqueViolation(error)) {
+        throw error;
+      }
+      const persisted = await readStamp(this.db);
+      if (!persisted.stamp) {
+        throw new Error(
+          'lost a concurrent deployment-stamp write, but the persisted stamp ' +
+            'could not be read back — the app_configs row may be corrupt',
+          { cause: error }
+        );
+      }
+      return { stamp: persisted.stamp, won: false };
     }
   }
 }

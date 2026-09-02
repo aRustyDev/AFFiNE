@@ -34,3 +34,22 @@ export function isUndefinedTable(error: unknown): boolean {
   const meta = (error as { meta?: { code?: unknown } }).meta;
   return !!meta && String(meta.code) === UNDEFINED_TABLE;
 }
+
+/** Prisma Client's own error code for a unique-constraint violation. */
+const UNIQUE_CONSTRAINT_VIOLATION = 'P2002';
+
+/**
+ * True when `error` is a Prisma unique-constraint violation — surfaced when
+ * two writers race to `create()` the same primary key for the first time
+ * (e.g. two pods concurrently adopting the same unstamped database, each
+ * running `db stamp` in its own initContainer). Used to implement
+ * first-writer-wins for the initial deployment stamp: the loser catches
+ * this and re-reads rather than clobbering the winner's row.
+ */
+export function isUniqueViolation(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === 'object' &&
+    (error as { code?: unknown }).code === UNIQUE_CONSTRAINT_VIOLATION
+  );
+}

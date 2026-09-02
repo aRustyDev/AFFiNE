@@ -2,7 +2,12 @@ import { PrismaClient } from '@prisma/client';
 import test from 'ava';
 
 import { type CompatReport, REFUSING_VERDICTS, type Verdict } from '../compat';
-import { DEPLOYMENT_STAMP_ID, readStamp, writeStamp } from '../identity';
+import {
+  type AdoptionMode,
+  DEPLOYMENT_STAMP_ID,
+  readStamp,
+  writeStamp,
+} from '../identity';
 import { DbCompatService, decide } from '../service';
 
 // `rollbackPossible: null` for EQUAL is the real contract (D16): the engine
@@ -482,6 +487,86 @@ test('stamp() refuses without writing when the current verdict refuses', async t
           process.env.AFFINE_DEPLOYMENT_ID = previous;
         }
       }
+    }
+  );
+});
+
+// Important 2. `stamp()` is read-modify-write: two pods both running `db
+// stamp` in their own initContainer on a fresh install (`replicas: 2`) can
+// both see `identity: absent` and both reach the initial-adoption path.
+// With `AFFINE_DEPLOYMENT_ID` unset (the day-one default the design
+// explicitly supports), each mints its OWN `randomUUID()`. Under a plain
+// `upsert()`, the second writer silently overwrites the first — the loser
+// has already logged "set AFFINE_DEPLOYMENT_ID=<its own minted id>" while
+// the database ends up holding the OTHER one, which bricks the next boot
+// the moment an operator follows that instruction.
+//
+// `recordAdoption` is private; called directly here (via a cast) to
+// reproduce the exact race window `report()`+`decide()` cannot reproduce
+// in a single sequential test — a second call reaching the SAME "this
+// needs adoption" decision that the first call already acted on.
+test('a second recordAdoption against an already-stamped row does not overwrite adoptedAt/adoptionMode (first-writer-wins)', async t => {
+  await withScratchSchema(
+    'db_compat_service_second_adoption',
+    createAppConfigsTable,
+    async scratch => {
+      const service = new DbCompatService(scratch);
+      const privateService = service as unknown as {
+        recordAdoption(mode: AdoptionMode): Promise<void>;
+      };
+
+      await privateService.recordAdoption('fresh-install');
+      const first = await readStamp(scratch);
+      const originalId = first.stamp?.deploymentId;
+      const originalAdoptedAt = first.stamp?.adoptedAt;
+      t.truthy(originalId);
+
+      await privateService.recordAdoption('fresh-install');
+
+      const second = await readStamp(scratch);
+      t.is(second.stamp?.deploymentId, originalId);
+      t.is(second.stamp?.adoptionMode, 'fresh-install');
+      t.is(second.stamp?.adoptedAt, originalAdoptedAt);
+      t.is(
+        await scratch.appConfig.count({ where: { id: DEPLOYMENT_STAMP_ID } }),
+        1
+      );
+    }
+  );
+});
+
+// Minor 5: an operator who consents via `db check --adopt` must have that
+// EXPLICIT consent survive into the stamp `db stamp` records — losing it
+// (recording `implicit` instead) loses the record that consent was given,
+// which is the bead's central ask. `stamp()` takes the same
+// `options.adopt === true || adoptRequested()` contract as `check()`.
+test('stamp({ adopt: true }) records the adoption as explicit even without AFFINE_DB_ADOPT set', async t => {
+  await withScratchSchema(
+    'db_compat_service_stamp_explicit_flag',
+    async schema => {
+      await createAppConfigsTable(schema);
+      // `users` must exist (even empty) for `populated` to resolve to
+      // `true` rather than `null` — a missing `users` table means
+      // undetermined, which would route to VIRGIN instead of DB_BEHIND.
+      await db.$executeRawUnsafe(
+        `CREATE TABLE "${schema}"."users" (id text PRIMARY KEY)`
+      );
+      await db.$executeRawUnsafe(
+        `CREATE TABLE "${schema}"."workspaces" (id text PRIMARY KEY)`
+      );
+      await db.$executeRawUnsafe(
+        `INSERT INTO "${schema}"."workspaces" (id) VALUES ('ws-1')`
+      );
+      // No `_prisma_migrations` table: populated is true (via the
+      // workspace row), verdict is DB_BEHIND (every real migration is
+      // pending, including BLOCKING ones) — exactly the case that needs
+      // the flag to proceed at all.
+    },
+    async scratch => {
+      const service = new DbCompatService(scratch);
+      await service.stamp({ adopt: true });
+      const after = await readStamp(scratch);
+      t.is(after.stamp?.adoptionMode, 'explicit');
     }
   );
 });
