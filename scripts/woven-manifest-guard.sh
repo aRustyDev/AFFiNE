@@ -49,9 +49,10 @@
 # OUTBOUND (--outbound): fail when the change set touches a file whose manifest
 # row says FORK-LOCAL CORE PATCH — don't leak a fork patch to upstream.
 # --dump-rows is a debugging aid, not a check: it prints every row the parser
-# and classifier saw — `path<TAB>category` for a row that parsed (the category
-# it was actually bucketed as, not just the raw manifest text — an inverted
-# ADDITIVE/FORK-LOCAL CORE PATCH classification would show up here), or
+# and classifier saw — `path<TAB>category<TAB>state<TAB>destination` for a row
+# that parsed (the category it was actually bucketed as, not just the raw
+# manifest text — an inverted ADDITIVE/FORK-LOCAL CORE PATCH classification
+# would show up here; destination is empty unless state is MOVED), or
 # `!UNPARSED<TAB><raw line>` for one that didn't parse — then exits 0 without
 # running any of the four checks above. It answers "what did the parser and
 # classifier actually see?", which is exactly the question you want answered
@@ -160,7 +161,23 @@ manifest_rows() {
         gsub(/[*_`]/, "", cat)              # drop markdown emphasis (**, __, `)
         sub(/^[[:space:]]+/, "", cat)
         sub(/[[:space:]]+$/, "", cat)
-        print path "\t" cat
+        # Column 5 (field 6) is State; absent or empty means PRESENT, which is
+        # the STRICTER reading and so the fail-closed default. A MOVED row
+        # carries its destination as a backticked path in the same cell: pull it
+        # out and REMOVE it from the cell BEFORE normalisation, because
+        # normalisation strips backticks and would otherwise leave the path
+        # glued to the keyword, defeating the exact-match compare below.
+        state = (n >= 6 ? f[6] : "")
+        dest = ""
+        if (match(state, /`[^`]+`/)) {
+          dest = substr(state, RSTART + 1, RLENGTH - 2)
+          state = substr(state, 1, RSTART - 1) substr(state, RSTART + RLENGTH)
+        }
+        gsub(/[*_`]/, "", state)
+        sub(/^[[:space:]]+/, "", state)
+        sub(/[[:space:]]+$/, "", state)
+        if (state == "") state = "PRESENT"
+        print path "\t" cat "\t" state "\t" dest
         next
       }
       print "!UNPARSED\t" $0
@@ -184,21 +201,34 @@ UNPARSED="$(printf '%s\n' "$UNPARSED_RAW" | cut -f2-)"
 # CLASSIFIED is built here and is exactly what --dump-rows prints — see below
 # for why FORKLOCAL is derived from it rather than built alongside it.
 BADCAT=""
+BADSTATE=""
 CLASSIFIED=""
-while IFS=$'\t' read -r p c; do
+while IFS=$'\t' read -r p c s d; do
   [ -n "$p" ] || continue
   case "$c" in
-    "FORK-LOCAL CORE PATCH")
-      CLASSIFIED="${CLASSIFIED}${p}"$'\t'"FORK-LOCAL CORE PATCH"$'\n'
-      ;;
-    "ADDITIVE")
-      CLASSIFIED="${CLASSIFIED}${p}"$'\t'"ADDITIVE"$'\n'
-      ;;
+    "FORK-LOCAL CORE PATCH") cc="FORK-LOCAL CORE PATCH" ;;
+    "ADDITIVE")              cc="ADDITIVE" ;;
     *)
       BADCAT="${BADCAT}${p}  [category: ${c:-<empty>}]"$'\n'
-      CLASSIFIED="${CLASSIFIED}${p}"$'\t'"!BADCAT(${c:-<empty>})"$'\n'
+      cc="!BADCAT(${c:-<empty>})"
       ;;
   esac
+  # State is validated independently of Category: the two columns answer
+  # different questions and a bad value in either is a broken manifest.
+  case "$s" in
+    PRESENT|REMOVED)
+      # A destination with no MOVED keyword means a half-edited cell. Ignoring
+      # the path silently is how clause 3 stops applying without anyone noticing.
+      [ -z "$d" ] || BADSTATE="${BADSTATE}${p}  [state: ${s} but carries destination '${d}']"$'\n'
+      ;;
+    MOVED)
+      [ -n "$d" ] || BADSTATE="${BADSTATE}${p}  [state: MOVED with no destination path]"$'\n'
+      ;;
+    *)
+      BADSTATE="${BADSTATE}${p}  [state: ${s:-<empty>}]"$'\n'
+      ;;
+  esac
+  CLASSIFIED="${CLASSIFIED}${p}"$'\t'"${cc}"$'\t'"${s}"$'\t'"${d}"$'\n'
 done <<< "$(printf '%s\n' "$ROWS" | grep -v '^!UNPARSED')"
 
 # FORKLOCAL is DERIVED from CLASSIFIED — the same value --dump-rows prints — so
@@ -209,7 +239,8 @@ done <<< "$(printf '%s\n' "$ROWS" | grep -v '^!UNPARSED')"
 FORKLOCAL="$(printf '%s' "$CLASSIFIED" | awk -F'\t' '$2=="FORK-LOCAL CORE PATCH"{print $1}' | sort -u)"
 
 # ---- --dump-rows: debugging aid, not a check -------------------------------
-# Prints what the parser AND the classifier saw — `path<TAB>category` per row,
+# Prints what the parser AND the classifier saw — `path<TAB>category<TAB>state
+# <TAB>destination` per row (destination empty unless MOVED),
 # `!UNPARSED<TAB><raw line>` for one that didn't parse — then exits before any
 # of the four checks below can fail the guard. Use it to see exactly what
 # a rejected row looked like, or to confirm a path is paired with the category
@@ -247,6 +278,16 @@ if [ -n "$BADCAT" ]; then
   err ""
   err "  Each row needs: | \`path\` | **ADDITIVE** or **FORK-LOCAL CORE PATCH** | why | delete when |"
   err "  Column 2 must read ADDITIVE or FORK-LOCAL CORE PATCH once markdown emphasis (*, _, \`) is stripped."
+  exit 2
+fi
+
+if [ -n "$BADSTATE" ]; then
+  err "manifest row(s) in $MANIFEST with an unrecognised State — refusing to guess:"
+  while IFS= read -r l; do [ -n "$l" ] && err "    $l"; done <<< "$BADSTATE"
+  err ""
+  err "  Column 5 must be empty (the file is present), REMOVED (this fork deletes it),"
+  err "  or MOVED followed by the destination as a backticked path, e.g."
+  err "    | \`old/path.ts\` | **ADDITIVE** | why | delete when | MOVED \`new/path.ts\` |"
   exit 2
 fi
 

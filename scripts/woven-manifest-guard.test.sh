@@ -205,10 +205,12 @@ echo "-- dump-rows: real manifest pairs each path with its actual classified cat
 run_guard --dump-rows --head HEAD
 expect_rc 0 "clean"
 DUMP_LINES="$(grep -F "$(printf '\t')" "$OUT" | sort)"
+# The live manifest has no State column, so every row defaults to PRESENT with
+# no destination — the fail-closed default this whole change must preserve.
 EXPECT_LINES="$(printf '%s\n' \
-  "$OIDC_PATH"$'\t'"FORK-LOCAL CORE PATCH" \
-  ".github/workflows/build-test.yml"$'\t'"ADDITIVE" \
-  "$SEED_PATH"$'\t'"ADDITIVE" | sort)"
+  "$OIDC_PATH"$'\t'"FORK-LOCAL CORE PATCH"$'\t'"PRESENT"$'\t' \
+  ".github/workflows/build-test.yml"$'\t'"ADDITIVE"$'\t'"PRESENT"$'\t' \
+  "$SEED_PATH"$'\t'"ADDITIVE"$'\t'"PRESENT"$'\t' | sort)"
 if [ "$DUMP_LINES" = "$EXPECT_LINES" ]; then
   ok "dump-rows pairs all 3 rows with the correct classified category, nothing more or less"
 else
@@ -369,6 +371,19 @@ else
     bad "exit 0 did not come from the outbound clean path"; dump
   fi
 fi
+
+# --- 14. fail closed: an unrecognised State is an ENVIRONMENT error ----------
+# Same rule as an unrecognised Category. A typo'd REMOVED must not silently read
+# as PRESENT — that would turn a declared deletion back into a STALE row, which
+# is the deadlock this whole change exists to remove.
+echo "-- fail closed: State=REMOVEDD is rejected, not guessed"
+awk -v p="$OIDC_PATH" '
+  $0 ~ p && /^\|/ { sub(/[[:space:]]*\|[[:space:]]*$/, " | **REMOVEDD** |"); }
+  { print }
+' "$MANIFEST" >"$TMPDIR_T/m-badstate.md"
+run_guard --manifest "$TMPDIR_T/m-badstate.md"
+expect_rc 2 "environment error"
+expect_names "REMOVEDD"
 
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
