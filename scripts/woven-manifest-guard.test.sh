@@ -54,6 +54,29 @@ expect_names() {
   done
 }
 
+# --- affine-83p shared fixture helpers ---------------------------------------
+MOVED_DEST="packages/backend/server/src/plugins/oauth/providers/woven-oidc.ts"
+
+mark_removed() {  # $1 = path to mark, $2 = output manifest
+  awk -v p="$1" '
+    $0 ~ p && /^\|/ { sub(/[[:space:]]*\|[[:space:]]*$/, " | **REMOVED** |"); }
+    { print }
+  ' "$MANIFEST" >"$2"
+}
+mark_moved() {  # $1 = source, $2 = destination, $3 = output manifest
+  awk -v p="$1" -v dst="$2" '
+    $0 ~ p && /^\|/ { sub(/[[:space:]]*\|[[:space:]]*$/, " | **MOVED** `" dst "` |"); }
+    { print }
+  ' "$MANIFEST" >"$3"
+}
+restore_oidc() { git checkout -- "$OIDC_PATH" 2>/dev/null || true; }
+restore_seed() { git checkout -- "$SEED_PATH" 2>/dev/null || true; }
+restore_move() {
+  git reset -q -- "$OIDC_PATH" "$MOVED_DEST" 2>/dev/null || true
+  rm -f "$MOVED_DEST"
+  git checkout -- "$OIDC_PATH" 2>/dev/null || true
+}
+
 echo "== woven-manifest-guard fixtures =="
 
 # --- 1. known-good tree: 3 upstream-owned diverged files, 3 manifest rows -----
@@ -384,6 +407,23 @@ awk -v p="$OIDC_PATH" '
 run_guard --manifest "$TMPDIR_T/m-badstate.md"
 expect_rc 2 "environment error"
 expect_names "REMOVEDD"
+
+# --- 15. the deadlock: a fork deletion declared REMOVED reaches green --------
+# affine-83p. Before this change both manifest states were red: keeping the row
+# gave STALE ("drop the row"), dropping it gave UNMANIFESTED ("add a row"). The
+# operator was told to do the thing they had just done.
+echo "-- declared deletion: delete oidc.ts, State=REMOVED -> clean"
+mark_removed "$OIDC_PATH" "$TMPDIR_T/m-removed.md"
+if ! git diff --quiet -- "$OIDC_PATH" 2>/dev/null; then
+  bad "$OIDC_PATH already has uncommitted changes; skipping"
+else
+  trap 'restore_oidc; rm -rf "$TMPDIR_T"' EXIT
+  rm -f "$OIDC_PATH"
+  run_guard --manifest "$TMPDIR_T/m-removed.md"
+  expect_rc 0 "declared deletion is clean"
+  restore_oidc
+  trap 'rm -rf "$TMPDIR_T"' EXIT
+fi
 
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="

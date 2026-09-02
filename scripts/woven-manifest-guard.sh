@@ -340,24 +340,51 @@ comm_rc=$?
 # answer here is a silent policy determination, not a crash.
 [ "$comm_rc" -eq 0 ] || die "comm failed while computing UNMANIFESTED (exit $comm_rc) — an environment error, not a policy determination; refusing to report a possibly-wrong result."
 
-# ---- check 2: rows whose path is gone from the tree ------------------------
+# ---- check 2: resolve each row against the tree, per its State --------------
+# One predicate used to carry four meanings — upstream deleted it, THIS BRANCH
+# deleted it, a rename moved it, or the row is a typo — and collapsed all four
+# into "drop or repoint the row". A fork deletion is a diff against the baseline,
+# so dropping the row just moved the failure to UNMANIFESTED. State separates
+# them: a declared deletion is satisfied by absence, and STALE now fires only
+# where absence really does implicate upstream. (affine-83p)
 STALE=""
 UNDIVERGED=""
-while IFS= read -r p; do
+RESURRECTED=""
+OBSOLETE=""
+MOVED_GONE=""
+
+# Hoisted out of the loop: these were redefined on every iteration.
+if [ "$WORKTREE" -eq 1 ]; then
+  path_present() { [ -e "$REPO_ROOT/$1" ]; }
+else
+  path_present() { git cat-file -e "${HEAD_SHA}:${1}" 2>/dev/null; }
+fi
+base_present() { git cat-file -e "${BASE_SHA}:${1}" 2>/dev/null; }
+
+while IFS=$'\t' read -r p c s d; do
   [ -n "$p" ] || continue
-  # Resolve the row against whatever tree we are judging: the filesystem in
-  # worktree mode, the committed tree otherwise.
-  if [ "$WORKTREE" -eq 1 ]; then
-    path_present() { [ -e "$REPO_ROOT/$1" ]; }
-  else
-    path_present() { git cat-file -e "${HEAD_SHA}:${1}" 2>/dev/null; }
-  fi
-  if ! path_present "$p"; then
-    STALE="${STALE}${p}"$'\n'
-  elif ! printf '%s\n' "$UPSTREAM_OWNED" | grep -qxF -- "$p"; then
-    UNDIVERGED="${UNDIVERGED}${p}"$'\n'
-  fi
-done <<< "$MANIFESTED"
+  case "$s" in
+    PRESENT)
+      if ! path_present "$p"; then
+        STALE="${STALE}${p}"$'\n'
+      elif ! printf '%s\n' "$UPSTREAM_OWNED" | grep -qxF -- "$p"; then
+        UNDIVERGED="${UNDIVERGED}${p}"$'\n'
+      fi
+      ;;
+    REMOVED|MOVED)
+      # MOVED shares every source-side verdict with REMOVED; it only adds the
+      # destination assertion below.
+      if path_present "$p"; then
+        RESURRECTED="${RESURRECTED}${p}"$'\n'
+      elif ! base_present "$p"; then
+        OBSOLETE="${OBSOLETE}${p}"$'\n'
+      fi
+      if [ "$s" = "MOVED" ] && ! path_present "$d"; then
+        MOVED_GONE="${MOVED_GONE}${p} -> ${d}"$'\n'
+      fi
+      ;;
+  esac
+done <<< "$CLASSIFIED"
 
 # ---- OUTBOUND mode: don't leak a fork patch to upstream --------------------
 # Asks an ADDITIONAL question to the inbound one, over the same inputs: not just
