@@ -1,5 +1,8 @@
 import test from 'ava';
 
+// getDefaultConfig is deliberately not re-exported from base/config/index.ts, so it must be
+// imported straight from register.ts — see the task brief for why.
+import { getDefaultConfig } from '../../../base/config/register';
 import {
   applyWovenSelfhostQuota,
   WOVEN_LIMIT_MAX,
@@ -476,4 +479,166 @@ test('the selfhosted parameter defaults to env.selfhosted', t => {
     // @ts-expect-error restore mutable test env singleton
     globalThis.env.DEPLOYMENT_TYPE = previous;
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// getDefaultConfig() env-var wiring
+//
+// Everything above this line exercises applyWovenSelfhostQuota and the zod shapes directly,
+// which is how ConfigFactory.override and CONFIG_JSON_PATHS reach the config at runtime — but
+// neither of those paths goes through parseEnvValue. The tests below are the only ones in this
+// suite that actually set WOVEN_SELFHOST_SEAT_LIMIT / _STORAGE_QUOTA / _BLOB_LIMIT as real
+// process.env strings and call getDefaultConfig() (packages/backend/server/src/base/config/
+// register.ts), which is the function the running server actually calls at boot. That is the
+// only way to prove the env mapping declared in defineModuleConfig('woven', ...) above is wired
+// correctly end to end, including through parseEnvValue's `parseInt`.
+//
+// KNOWN ENVIRONMENTAL FRAGILITY: getDefaultConfig() also applies CONFIG_JSON_PATHS overrides
+// last, and those overrides are NOT validated (see the file-level comment at the top of
+// woven-config.ts). If a machine running this suite happens to have a
+// ~/.affine/config/config.json (or <projectRoot>/config.json) containing a `woven.*` key, that
+// override is merged in after our env vars and after validation, and could make any of the
+// assertions below fail for a reason that has nothing to do with this code. If that happens,
+// check those two paths before assuming a regression.
+const WOVEN_ENV_KEYS = [
+  'WOVEN_SELFHOST_SEAT_LIMIT',
+  'WOVEN_SELFHOST_STORAGE_QUOTA',
+  'WOVEN_SELFHOST_BLOB_LIMIT',
+] as const;
+
+// Saves and restores all three WOVEN_SELFHOST_* env vars around `fn`, in a try/finally, so a
+// case that throws (as several below deliberately do) can never leak a value into a later test
+// or into the rest of the test run. `values` sets only the keys it names; any key not named is
+// deleted for the duration, which is what lets the "unset means inherit" tests below share this
+// helper with the "set" tests.
+//
+// This file uses plain `test`, not `test.serial`, and these tests follow suit rather than
+// silently changing the file's test mode. That is safe here only because every test body below
+// is fully synchronous (no `await`, no promise returned) — AVA schedules test bodies but a
+// synchronous function runs to completion (including its `finally` restore) before control
+// returns to AVA to start the next one, so there is no interleaving window in which one test's
+// env mutation could be observed by another. If a future edit makes one of these tests async,
+// this reasoning no longer holds and they should move to test.serial.
+function withWovenEnv(
+  values: Partial<Record<(typeof WOVEN_ENV_KEYS)[number], string>>,
+  fn: () => void
+) {
+  const previous: Partial<Record<(typeof WOVEN_ENV_KEYS)[number], string>> = {};
+  for (const key of WOVEN_ENV_KEYS) {
+    previous[key] = process.env[key];
+  }
+  try {
+    for (const key of WOVEN_ENV_KEYS) {
+      if (key in values) {
+        process.env[key] = values[key] as string;
+      } else {
+        delete process.env[key];
+      }
+    }
+    fn();
+  } finally {
+    for (const key of WOVEN_ENV_KEYS) {
+      const prior = previous[key];
+      if (prior === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = prior;
+      }
+    }
+  }
+}
+
+test('WOVEN_SELFHOST_* env vars reach the correct config keys, with no mix-up between seat/storage/blob', t => {
+  withWovenEnv(
+    {
+      WOVEN_SELFHOST_SEAT_LIMIT: '1000',
+      WOVEN_SELFHOST_STORAGE_QUOTA: '2000',
+      WOVEN_SELFHOST_BLOB_LIMIT: '3000',
+    },
+    () => {
+      const config = getDefaultConfig();
+      t.is(config.woven.selfhostSeatLimit, 1000);
+      t.is(config.woven.selfhostStorageQuota, 2000);
+      t.is(config.woven.selfhostBlobLimit, 3000);
+    }
+  );
+});
+
+test('with none of the WOVEN_SELFHOST_* env vars set, all three keys inherit (-1)', t => {
+  withWovenEnv({}, () => {
+    const config = getDefaultConfig();
+    t.is(config.woven.selfhostSeatLimit, -1);
+    t.is(config.woven.selfhostStorageQuota, -1);
+    t.is(config.woven.selfhostBlobLimit, -1);
+  });
+});
+
+test('an empty-string env var is falsy, so getDefaultConfig treats it as unset and the -1 default survives', t => {
+  withWovenEnv({ WOVEN_SELFHOST_SEAT_LIMIT: '' }, () => {
+    const config = getDefaultConfig();
+    t.is(config.woven.selfhostSeatLimit, -1);
+  });
+});
+
+test('WOVEN_SELFHOST_SEAT_LIMIT=0 fails the boot loudly, naming the module and key', t => {
+  withWovenEnv({ WOVEN_SELFHOST_SEAT_LIMIT: '0' }, () => {
+    const error = t.throws<Error>(() => getDefaultConfig());
+    // register.ts's getDefaultConfig formats this as
+    // `Invalid config for module [${module}] with key [${key}]\nValue: ...\nError: ...`,
+    // which is what makes a bad deployment diagnosable from the boot log alone.
+    t.true(
+      error.message.includes('[woven]'),
+      'error must name the module: ' + error.message
+    );
+    t.true(
+      error.message.includes('[selfhostSeatLimit]'),
+      'error must name the key: ' + error.message
+    );
+  });
+});
+
+test('an out-of-range seat floor fails the boot; the same magnitude is a valid floor for storage/blob', t => {
+  // 5_000_000_000 is a safe integer, well past int4 (WOVEN_LIMIT_MAX.selfhostSeatLimit ===
+  // 2147483647), so this exercises the per-key ceiling rather than a non-numeric/non-finite
+  // rejection — see the equivalent contrast test against applyWovenSelfhostQuota above.
+  withWovenEnv({ WOVEN_SELFHOST_SEAT_LIMIT: '5000000000' }, () => {
+    const error = t.throws<Error>(() => getDefaultConfig());
+    t.true(error.message.includes('[woven]'));
+    t.true(error.message.includes('[selfhostSeatLimit]'));
+  });
+
+  // Storage/blob are bounded by Number.MAX_SAFE_INTEGER, not int4, so the identical magnitude
+  // that just crashed the seat key above must boot cleanly and land as-is for storage.
+  withWovenEnv({ WOVEN_SELFHOST_STORAGE_QUOTA: '5000000000' }, () => {
+    const config = getDefaultConfig();
+    t.is(config.woven.selfhostStorageQuota, 5_000_000_000);
+  });
+});
+
+test('WOVEN_SELFHOST_SEAT_LIMIT=1_000 is silently truncated to 1 by parseInt — known trap, bead affine-fgo', t => {
+  // Verify the trap directly rather than assume it: parseInt (packages/backend/server/src/
+  // base/config/env.ts:27, called with no radix) stops at the first character it can't parse,
+  // so the underscore truncates the parse to just the leading "1" rather than throwing or
+  // reading "1000".
+  t.is(
+    parseInt('1_000'),
+    1,
+    'parseInt must stop at the underscore rather than parsing "1000" or NaN-ing out'
+  );
+
+  withWovenEnv({ WOVEN_SELFHOST_SEAT_LIMIT: '1_000' }, () => {
+    const config = getDefaultConfig();
+    // The zod shape only rejects 0 (see limitShape's `refine`), not "suspiciously small", so
+    // 1 >= 1 passes validation and the server boots successfully with a seat floor of 1 instead
+    // of the operator's intended 1000 — a silent underflow, not a thrown error. This is shipped
+    // behaviour, not a bug this test is asserting is fixed: it is tracked as its own issue,
+    // bead affine-fgo. The descriptor's operator-facing text already warns about exactly this
+    // ("Plain integer, no units or separators (e.g. 1000, not "1,000")."); this test pins that,
+    // absent a stricter parser, the silent-floor outcome is what actually ships today.
+    t.is(
+      config.woven.selfhostSeatLimit,
+      1,
+      'the parseInt trap silently floors "1_000" to a seat limit of 1, not 1000'
+    );
+  });
 });
