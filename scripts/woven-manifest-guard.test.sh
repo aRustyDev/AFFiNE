@@ -466,6 +466,23 @@ else
   ok "no UNMANIFESTED noise -- OBSOLETE is the sole reported verdict"
 fi
 
+# --- 18. STALE names BOTH causes and both achievable fixes -------------------
+# The acceptance criterion of affine-83p: the message must distinguish "absent
+# because upstream deleted it" from "absent because this branch deleted it", and
+# must not prescribe an action that produces the opposite failure.
+echo "-- stale message: offers REMOVED as well as drop/repoint"
+if ! git diff --quiet -- "$OIDC_PATH" 2>/dev/null; then
+  bad "$OIDC_PATH already has uncommitted changes; skipping"
+else
+  trap 'restore_oidc; rm -rf "$TMPDIR_T"' EXIT
+  rm -f "$OIDC_PATH"
+  run_guard   # live manifest: the row is PRESENT and undeclared
+  expect_rc 1 "policy violation"
+  expect_names "$OIDC_PATH" "REMOVED"
+  restore_oidc
+  trap 'rm -rf "$TMPDIR_T"' EXIT
+fi
+
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

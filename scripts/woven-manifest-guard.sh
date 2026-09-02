@@ -432,10 +432,9 @@ if [ "$OUTBOUND" -eq 1 ]; then
       err "cannot judge this change set: manifest row(s) whose path no longer exists in the tree:"
       while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$STALE"
       err ""
-      err "  A stale row's category no longer describes this tree — the file may have"
-      err "  been renamed (a rename would otherwise hide the old path from this diff)"
-      err "  or deleted. Update or drop the row in ${MANIFEST#"$REPO_ROOT/"} before this"
-      err "  branch can be judged safe for upstream."
+      err "  A stale row's category no longer describes this tree. If upstream deleted or"
+      err "  renamed the file, drop or repoint the row; if THIS BRANCH deleted it, set the"
+      err "  row's State to REMOVED (or MOVED \`new/path\`) and run again."
     fi
     exit 1
   fi
@@ -483,9 +482,12 @@ fi
 
 if [ -n "$STALE" ]; then
   rc=1
-  err "STALE manifest row(s) in ${MANIFEST#"$REPO_ROOT/"} — the path no longer exists in the tree; upstream probably deleted or renamed it:"
+  err "STALE manifest row(s) in ${MANIFEST#"$REPO_ROOT/"} — the path is not in the tree:"
   while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$STALE"
-  err "  Drop the row, or repoint it at the new path."
+  err "  Two causes, two different fixes:"
+  err "    * upstream deleted or renamed it  -> drop the row, or repoint it at the new path"
+  err "    * THIS BRANCH deleted it          -> keep the row and set State to REMOVED"
+  err "      (a rename: State = MOVED \`new/path\`)"
 fi
 
 if [ -n "$RESURRECTED" ]; then
