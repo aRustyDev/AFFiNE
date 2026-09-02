@@ -40,8 +40,9 @@
 #                         already absent at the baseline too, so the row no
 #                         longer describes any divergence.
 #   8. MOVED GONE      — a row's State is MOVED, but its destination path is
-#                         not in the tree — the file was never put there, or
-#                         the destination itself is a typo.
+#                         not a FILE in the tree — absent outright, the file
+#                         was never put there, or the destination is a typo
+#                         that happens to name an existing directory.
 #   Every offending path is printed, so the fix is mechanical rather than a
 #   re-audit. Rows for files that no longer diverge are reported as a WARNING
 #   only — harmless staleness, not a reason to block a PR.
@@ -373,8 +374,23 @@ MOVED_GONE=""
 # alongside path_present, since both are read on every pass through the loop.
 if [ "$WORKTREE" -eq 1 ]; then
   path_present() { [ -e "$REPO_ROOT/$1" ]; }
+  # A MOVED destination must resolve to a FILE, not merely exist: [ -e ] is
+  # also true for a directory, so a manifest typo that points State at the
+  # file's own parent directory would otherwise read as "destination present"
+  # and fail open — exactly the error class MOVED_GONE exists to catch. Scoped
+  # to the destination only: source paths (PRESENT/REMOVED/RESURRECTED/
+  # OBSOLETE) keep using path_present, which answers "does this path still
+  # resolve", not "is this specifically a file" — widening path_present itself
+  # would change STALE/RESURRECTED/OBSOLETE semantics too, which is untested
+  # here.
+  file_present() { [ -f "$REPO_ROOT/$1" ]; }
 else
   path_present() { git cat-file -e "${HEAD_SHA}:${1}" 2>/dev/null; }
+  # Same reasoning as the worktree branch above: `git cat-file -e` succeeds for
+  # a tree (directory) object too, so it cannot tell "destination is a file"
+  # from "destination is a directory that happens to exist". Require the
+  # object type to be exactly `blob`.
+  file_present() { [ "$(git cat-file -t "${HEAD_SHA}:${1}" 2>/dev/null)" = "blob" ]; }
 fi
 base_present() { git cat-file -e "${BASE_SHA}:${1}" 2>/dev/null; }
 
@@ -396,7 +412,15 @@ while IFS=$'\t' read -r p c s d; do
       elif ! base_present "$p"; then
         OBSOLETE="${OBSOLETE}${p}"$'\n'
       fi
-      if [ "$s" = "MOVED" ] && ! path_present "$d"; then
+      # file_present, not path_present: a destination that resolves to a
+      # directory must still be reported (see the definitions above). NOTE:
+      # on a Windows checkout, git-bash's filesystem calls accept a backslash
+      # as a path separator, so a destination typo'd with backslashes (e.g.
+      # `pkg\file.ts`) can still resolve as present locally even though the
+      # literal string is wrong. Linux CI treats the backslash as part of the
+      # filename and correctly reports it absent. A green run of this check on
+      # Windows is therefore not full validation of it — CI is authoritative.
+      if [ "$s" = "MOVED" ] && ! file_present "$d"; then
         MOVED_GONE="${MOVED_GONE}${p} -> ${d}"$'\n'
       fi
       ;;

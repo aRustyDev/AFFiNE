@@ -484,22 +484,47 @@ else
 fi
 
 # --- 19. MOVED: source gone, destination present -> clean --------------------
+# The precondition check must catch a STRANDED tree too, not just an ordinary
+# dirty one: `git mv` stages both halves of the rename, so if a PRIOR run of
+# this fixture was killed after `git mv` but before restore_move(), the index
+# no longer has an entry at $OIDC_PATH at all -- there is nothing left for a
+# plain `git diff --quiet -- "$OIDC_PATH"` (working tree vs INDEX) to compare,
+# so it reports "quiet" even though the tree is not actually in its starting
+# state. Requiring the source to literally exist closes that gap directly.
 echo "-- moved: git mv oidc.ts, row State=MOVED <dest> -> clean"
 mark_moved "$OIDC_PATH" "$MOVED_DEST" "$TMPDIR_T/m-moved.md"
-if ! git diff --quiet -- "$OIDC_PATH" 2>/dev/null; then
-  bad "$OIDC_PATH already has uncommitted changes; skipping"
+if ! git diff --quiet -- "$OIDC_PATH" 2>/dev/null || [ ! -e "$OIDC_PATH" ]; then
+  bad "$OIDC_PATH already has uncommitted changes, or is missing (a prior interrupted run?); skipping"
 else
   trap 'restore_move; rm -rf "$TMPDIR_T"' EXIT
-  git mv "$OIDC_PATH" "$MOVED_DEST"
-  run_guard --manifest "$TMPDIR_T/m-moved.md"
-  expect_rc 0 "declared rename is clean"
+  # set -uo pipefail has no -e, so a failed `git mv` would otherwise be
+  # silently ignored and every fixture below would run against whatever state
+  # the failed move left behind -- hard-fail instead of guessing.
+  if ! git mv "$OIDC_PATH" "$MOVED_DEST"; then
+    bad "git mv $OIDC_PATH -> $MOVED_DEST failed; skipping fixtures 19-21 rather than continuing on an unknown tree state"
+  else
+    run_guard --manifest "$TMPDIR_T/m-moved.md"
+    expect_rc 0 "declared rename is clean"
 
-  # --- 20. MOVED with a destination that is not there is a violation ---------
-  echo "-- moved: destination absent -> violation"
-  mark_moved "$OIDC_PATH" "packages/backend/server/src/never-created.ts" "$TMPDIR_T/m-moved-gone.md"
-  run_guard --manifest "$TMPDIR_T/m-moved-gone.md"
-  expect_rc 1 "policy violation"
-  expect_names "never-created.ts"
+    # --- 20. MOVED with a destination that is not there is a violation -------
+    echo "-- moved: destination absent -> violation"
+    mark_moved "$OIDC_PATH" "packages/backend/server/src/never-created.ts" "$TMPDIR_T/m-moved-gone.md"
+    run_guard --manifest "$TMPDIR_T/m-moved-gone.md"
+    expect_rc 1 "policy violation"
+    expect_names "never-created.ts"
+
+    # --- 21. MOVED destination that is a DIRECTORY is a violation, not clean -
+    # A directory satisfies both `[ -e ]` (worktree mode) and `git cat-file -e`
+    # (committed mode) -- a MOVED row typo'd to name the file's own parent
+    # directory would otherwise read as "destination present" and fail open,
+    # which is exactly the error class this whole check exists to catch.
+    echo "-- moved: destination is a directory, not a file -> violation"
+    DIR_DEST="packages/backend/server/src/plugins/oauth/providers"
+    mark_moved "$OIDC_PATH" "$DIR_DEST" "$TMPDIR_T/m-moved-dir.md"
+    run_guard --manifest "$TMPDIR_T/m-moved-dir.md"
+    expect_rc 1 "policy violation"
+    expect_names "$DIR_DEST"
+  fi
 
   restore_move
   trap 'rm -rf "$TMPDIR_T"' EXIT
