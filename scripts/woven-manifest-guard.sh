@@ -251,7 +251,16 @@ done <<< "$(printf '%s\n' "$ROWS" | grep -v '^!UNPARSED')"
 # two in parallel would let them drift, and a fixture over the dump could not
 # see it. Exact field match, never a substring: a marker line must not be
 # mistaken for a classification.
-FORKLOCAL="$(printf '%s' "$CLASSIFIED" | awk -F'\t' '$2=="FORK-LOCAL CORE PATCH"{print $1}' | sort -u)"
+#
+# Clause 3 (affine-83p): a MOVED row's DESTINATION joins the set. The
+# destination did not exist at the baseline, so it is fork-owned and falls
+# outside UPSTREAM_OWNED entirely — without this line a renamed core patch is
+# fully present in the tree and invisible to the outbound check.
+FORKLOCAL="$(printf '%s' "$CLASSIFIED" | awk -F'\t' '
+  $2=="FORK-LOCAL CORE PATCH" {
+    print $1
+    if ($3=="MOVED" && $4!="") print $4
+  }' | sort -u)"
 
 # ---- --dump-rows: debugging aid, not a check -------------------------------
 # Prints what the parser AND the classifier saw — `path<TAB>category<TAB>state

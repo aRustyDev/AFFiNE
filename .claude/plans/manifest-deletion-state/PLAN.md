@@ -45,7 +45,7 @@ Expected: every fixture `✔`, `rc=0`.
 **Modified:**
 
 - `scripts/woven-manifest-guard.sh` — `manifest_rows()` emits state + destination; the classifier gains `BADSTATE`; the row-resolution loop becomes state-aware and grows three new verdicts; `FORKLOCAL` gains clause 3. **All policy lives here.**
-- `scripts/woven-manifest-guard.test.sh` — eleven new fixtures (14–24) alongside the existing thirteen.
+- `scripts/woven-manifest-guard.test.sh` — twelve new fixtures (18–29) alongside the existing seventeen.
 - `scripts/woven-patch-manifest.md` — the table gains the `State` column and the legend documents its vocabulary.
 
 **Created:** nothing. This is a change to one engine and its manifest.
@@ -751,9 +751,9 @@ micromamba run -n affine git commit -m "docs(woven): document the State column i
 
 ## Done when
 
-- `scripts/woven-manifest-guard.test.sh` is green, with fixtures 14–24 added.
-- Deleting an upstream-owned file has a reachable green state in both directions (fixtures 15, 22, 23).
-- Renaming one has a reachable green state inbound and is still caught outbound at its destination (fixtures 19, 21).
-- `STALE` names both causes and neither prescription produces the opposite failure (fixture 18).
+- `scripts/woven-manifest-guard.test.sh` is green, with fixtures 18–29 added.
+- Deleting an upstream-owned file has a reachable green state in both directions (fixtures 19, 27, 28).
+- Renaming one has a reachable green state inbound and is still caught outbound at its destination (fixtures 23, 26).
+- `STALE` names both causes and neither prescription produces the opposite failure (fixture 22).
 - The outbound `STALE` gate is unchanged, as `affine-83p` requires.
 - `bd close affine-83p` with a reason naming the fixtures that prove each acceptance criterion.

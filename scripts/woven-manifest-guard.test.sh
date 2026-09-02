@@ -395,7 +395,7 @@ else
   fi
 fi
 
-# --- 14. fail closed: an unrecognised State is an ENVIRONMENT error ----------
+# --- 18. fail closed: an unrecognised State is an ENVIRONMENT error ----------
 # Same rule as an unrecognised Category. A typo'd REMOVED must not silently read
 # as PRESENT — that would turn a declared deletion back into a STALE row, which
 # is the deadlock this whole change exists to remove.
@@ -408,7 +408,7 @@ run_guard --manifest "$TMPDIR_T/m-badstate.md"
 expect_rc 2 "environment error"
 expect_names "REMOVEDD"
 
-# --- 15. the deadlock: a fork deletion declared REMOVED reaches green --------
+# --- 19. the deadlock: a fork deletion declared REMOVED reaches green --------
 # affine-83p. Before this change both manifest states were red: keeping the row
 # gave STALE ("drop the row"), dropping it gave UNMANIFESTED ("add a row"). The
 # operator was told to do the thing they had just done.
@@ -425,7 +425,7 @@ else
   trap 'rm -rf "$TMPDIR_T"' EXIT
 fi
 
-# --- 16. RESURRECTED: the row says the fork removes it, but it is back -------
+# --- 20. RESURRECTED: the row says the fork removes it, but it is back -------
 # A safety property the guard did not previously have. An upstream merge that
 # restores a file the fork deleted is otherwise completely silent.
 echo "-- resurrected: State=REMOVED but the file is present"
@@ -434,7 +434,7 @@ run_guard --manifest "$TMPDIR_T/m-resurrect.md" --head HEAD
 expect_rc 1 "policy violation"
 expect_names "$SEED_PATH"
 
-# --- 17. OBSOLETE: upstream deleted it too, so the row describes nothing -----
+# --- 21. OBSOLETE: upstream deleted it too, so the row describes nothing -----
 # A previous version of this fixture hijacked oidc.ts's OWN row (renaming its
 # path to the ghost path), which drops oidc.ts out of the manifest and trips
 # UNMANIFESTED(oidc.ts) on its own -- rc=1 regardless of whether OBSOLETE is
@@ -461,12 +461,12 @@ run_guard --manifest "$TMPDIR_T/m-obsolete.md" --head HEAD
 expect_rc 1 "policy violation"
 expect_names "$GHOST_REMOVED"
 if grep -qF -- "UNMANIFESTED" "$OUT"; then
-  bad "fixture 17 tripped UNMANIFESTED instead of testing OBSOLETE in isolation"
+  bad "fixture 21 tripped UNMANIFESTED instead of testing OBSOLETE in isolation"
 else
   ok "no UNMANIFESTED noise -- OBSOLETE is the sole reported verdict"
 fi
 
-# --- 18. STALE names BOTH causes and both achievable fixes -------------------
+# --- 22. STALE names BOTH causes and both achievable fixes -------------------
 # The acceptance criterion of affine-83p: the message must distinguish "absent
 # because upstream deleted it" from "absent because this branch deleted it", and
 # must not prescribe an action that produces the opposite failure.
@@ -483,7 +483,7 @@ else
   trap 'rm -rf "$TMPDIR_T"' EXIT
 fi
 
-# --- 19. MOVED: source gone, destination present -> clean --------------------
+# --- 23. MOVED: source gone, destination present -> clean --------------------
 # The precondition check must catch a STRANDED tree too, not just an ordinary
 # dirty one: `git mv` stages both halves of the rename, so if a PRIOR run of
 # this fixture was killed after `git mv` but before restore_move(), the index
@@ -501,19 +501,19 @@ else
   # silently ignored and every fixture below would run against whatever state
   # the failed move left behind -- hard-fail instead of guessing.
   if ! git mv "$OIDC_PATH" "$MOVED_DEST"; then
-    bad "git mv $OIDC_PATH -> $MOVED_DEST failed; skipping fixtures 19-21 rather than continuing on an unknown tree state"
+    bad "git mv $OIDC_PATH -> $MOVED_DEST failed; skipping fixtures 23-25 rather than continuing on an unknown tree state"
   else
     run_guard --manifest "$TMPDIR_T/m-moved.md"
     expect_rc 0 "declared rename is clean"
 
-    # --- 20. MOVED with a destination that is not there is a violation -------
+    # --- 24. MOVED with a destination that is not there is a violation -------
     echo "-- moved: destination absent -> violation"
     mark_moved "$OIDC_PATH" "packages/backend/server/src/never-created.ts" "$TMPDIR_T/m-moved-gone.md"
     run_guard --manifest "$TMPDIR_T/m-moved-gone.md"
     expect_rc 1 "policy violation"
     expect_names "never-created.ts"
 
-    # --- 21. MOVED destination that is a DIRECTORY is a violation, not clean -
+    # --- 25. MOVED destination that is a DIRECTORY is a violation, not clean -
     # A directory satisfies both `[ -e ]` (worktree mode) and `git cat-file -e`
     # (committed mode) -- a MOVED row typo'd to name the file's own parent
     # directory would otherwise read as "destination present" and fail open,
@@ -526,6 +526,34 @@ else
     expect_names "$DIR_DEST"
   fi
 
+  restore_move
+  trap 'rm -rf "$TMPDIR_T"' EXIT
+fi
+
+# --- 26. clause 3: outbound sees a FORK-LOCAL patch at its NEW address -------
+# Without this, fixing the deadlock reintroduces the very leak --no-renames
+# exists to prevent: the rename reaches green, the destination is fork-owned
+# (absent at the baseline) and so falls outside UPSTREAM_OWNED, and outbound
+# goes blind to a fully-present relocated core patch. This fixture is the only
+# thing standing between the affine-83p fix and that regression.
+#
+# Same hardened precondition as fixtures 23-25: require the source to
+# literally exist (not just `git diff --quiet`, which a tree stranded by a
+# prior interrupted run would pass vacuously), and hard-fail if `git mv`
+# itself fails rather than continuing on an unknown tree state.
+echo "-- outbound: a MOVED FORK-LOCAL patch is caught at its destination"
+mark_moved "$OIDC_PATH" "$MOVED_DEST" "$TMPDIR_T/m-moved.md"
+if ! git diff --quiet -- "$OIDC_PATH" 2>/dev/null || [ ! -e "$OIDC_PATH" ]; then
+  bad "$OIDC_PATH already has uncommitted changes, or is missing (a prior interrupted run?); skipping"
+else
+  trap 'restore_move; rm -rf "$TMPDIR_T"' EXIT
+  if ! git mv "$OIDC_PATH" "$MOVED_DEST"; then
+    bad "git mv $OIDC_PATH -> $MOVED_DEST failed; skipping fixture 26 rather than continuing on an unknown tree state"
+  else
+    run_guard --outbound --manifest "$TMPDIR_T/m-moved.md"
+    expect_rc 1 "policy violation"
+    expect_names "$MOVED_DEST"
+  fi
   restore_move
   trap 'rm -rf "$TMPDIR_T"' EXIT
 fi
