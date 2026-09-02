@@ -425,6 +425,27 @@ else
   trap 'rm -rf "$TMPDIR_T"' EXIT
 fi
 
+# --- 16. RESURRECTED: the row says the fork removes it, but it is back -------
+# A safety property the guard did not previously have. An upstream merge that
+# restores a file the fork deleted is otherwise completely silent.
+echo "-- resurrected: State=REMOVED but the file is present"
+mark_removed "$SEED_PATH" "$TMPDIR_T/m-resurrect.md"
+run_guard --manifest "$TMPDIR_T/m-resurrect.md" --head HEAD
+expect_rc 1 "policy violation"
+expect_names "$SEED_PATH"
+
+# --- 17. OBSOLETE: upstream deleted it too, so the row describes nothing -----
+echo "-- obsolete: State=REMOVED on a path absent from the baseline"
+GHOST_REMOVED="packages/backend/server/src/gone-from-both.ts"
+sed "s|\`$OIDC_PATH\`|\`$GHOST_REMOVED\`|" "$MANIFEST" >"$TMPDIR_T/m-obs-1.md"
+awk -v p="$GHOST_REMOVED" '
+  $0 ~ p && /^\|/ { sub(/[[:space:]]*\|[[:space:]]*$/, " | **REMOVED** |"); }
+  { print }
+' "$TMPDIR_T/m-obs-1.md" >"$TMPDIR_T/m-obsolete.md"
+run_guard --manifest "$TMPDIR_T/m-obsolete.md" --head HEAD
+expect_rc 1 "policy violation"
+expect_names "$GHOST_REMOVED"
+
 echo
 printf '%s\n' "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

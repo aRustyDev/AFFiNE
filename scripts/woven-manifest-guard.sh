@@ -18,9 +18,11 @@
 #
 # CHECKS
 #   1. UNMANIFESTED    — an upstream-owned file diverges with no manifest row.
-#   2. STALE ROW       — a manifest row names a path absent from the tree
-#                         (upstream deleted it, or it was renamed and the row
-#                         was not updated).
+#   2. STALE ROW       — a State=PRESENT row names a path absent from the
+#                         tree (upstream deleted or renamed it, or the
+#                         manifest path itself is a typo). A fork's OWN
+#                         deletion is declared via State=REMOVED instead —
+#                         see RESURRECTED and OBSOLETE below.
 #   3. UNPARSEABLE ROW — an in-section table row that is not the header, not
 #                         the separator, and not a well-formed
 #                         `path` | category row (e.g. a missing backtick).
@@ -28,6 +30,15 @@
 #   4. BAD CATEGORY    — a row's category, once markdown emphasis is
 #                         stripped, is not exactly ADDITIVE or FORK-LOCAL CORE
 #                         PATCH. Never guessed as ADDITIVE.
+#   5. BAD STATE       — a row's State, once markdown emphasis is stripped,
+#                         is not empty/PRESENT, REMOVED, or MOVED followed by
+#                         a destination path. Never guessed.
+#   6. RESURRECTED     — a row's State is REMOVED or MOVED, but the path is
+#                         present in the tree anyway — most likely an
+#                         upstream merge restored it.
+#   7. OBSOLETE        — a row's State is REMOVED or MOVED, but the path was
+#                         already absent at the baseline too, so the row no
+#                         longer describes any divergence.
 #   Every offending path is printed, so the fix is mechanical rather than a
 #   re-audit. Rows for files that no longer diverge are reported as a WARNING
 #   only — harmless staleness, not a reason to block a PR.
@@ -36,8 +47,8 @@
 #   0  clean
 #   1  policy violation
 #   2  usage or environment error — unresolvable baseline, missing manifest,
-#      an unparseable manifest row, an unrecognised category, or (under
-#      --outbound) a manifest table with no rows at all.
+#      an unparseable manifest row, an unrecognised category or State, or
+#      (under --outbound) a manifest table with no rows at all.
 #
 # Usage:
 #   scripts/woven-manifest-guard.sh [--base REF] [--head REF] [--manifest PATH]
@@ -353,7 +364,10 @@ RESURRECTED=""
 OBSOLETE=""
 MOVED_GONE=""
 
-# Hoisted out of the loop: these were redefined on every iteration.
+# path_present is hoisted out of the loop below: it used to be redefined on
+# every iteration. base_present has no such history — it is new with State
+# awareness and was never per-iteration — but it is defined once here anyway,
+# alongside path_present, since both are read on every pass through the loop.
 if [ "$WORKTREE" -eq 1 ]; then
   path_present() { [ -e "$REPO_ROOT/$1" ]; }
 else
@@ -472,6 +486,22 @@ if [ -n "$STALE" ]; then
   err "STALE manifest row(s) in ${MANIFEST#"$REPO_ROOT/"} — the path no longer exists in the tree; upstream probably deleted or renamed it:"
   while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$STALE"
   err "  Drop the row, or repoint it at the new path."
+fi
+
+if [ -n "$RESURRECTED" ]; then
+  rc=1
+  err "RESURRECTED — ${MANIFEST#"$REPO_ROOT/"} says this fork removes these files, but they are present:"
+  while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$RESURRECTED"
+  err "  An upstream merge probably restored them. Either delete them again, or —"
+  err "  if the fork now keeps upstream's version — clear the State cell back to empty."
+fi
+
+if [ -n "$OBSOLETE" ]; then
+  rc=1
+  err "OBSOLETE row(s) in ${MANIFEST#"$REPO_ROOT/"} — marked REMOVED, but absent from the baseline too:"
+  while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$OBSOLETE"
+  err "  Upstream deleted the file as well, so the row no longer describes a divergence."
+  err "  Drop the row."
 fi
 
 if [ -n "$UNDIVERGED" ]; then
