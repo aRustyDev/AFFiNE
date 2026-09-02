@@ -2,7 +2,7 @@
 //
 // Companion to the FORK-LOCAL CORE PATCH in ./state.ts (bead affine-vap). All the logic lives
 // here so that upstream owns only the two call sites; see
-// .claude/plans/selfhost-quota-limits/PLAN.md.
+// .claude/plans/selfhost-quota-limits/DESIGN.md.
 //
 // Convention: -1 inherits the plan value (default, so an unconfigured server behaves exactly
 // like upstream), N >= 1 is a FLOOR applied via max(). 0 is rejected: upstream already uses 0
