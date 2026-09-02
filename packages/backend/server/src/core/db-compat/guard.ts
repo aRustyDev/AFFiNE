@@ -1,8 +1,4 @@
-import {
-  Injectable,
-  Logger,
-  type OnApplicationBootstrap,
-} from '@nestjs/common';
+import { type INestApplicationContext, Logger } from '@nestjs/common';
 
 import { bootGuardBypassed } from './env';
 import { renderReport } from './render';
@@ -32,6 +28,18 @@ export function enforce(
 ): void {
   const { report } = decision;
 
+  // Minor A: a bypass left set is invisible until it is used. Log every time
+  // it is armed — even when the decision would have been `ok` anyway — so an
+  // operator who fixes the database and forgets to unset
+  // AFFINE_DB_COMPAT_SKIP gets a standing signal rather than a silently
+  // defanged guard.
+  if (context.bypassed) {
+    context.logger.error(
+      `AFFINE_DB_COMPAT_SKIP is set — the boot guard is disabled (current verdict: ` +
+        `${report.verdict}). This is an incident bypass, not a setting; unset it once resolved.`
+    );
+  }
+
   if (decision.ok) {
     return;
   }
@@ -47,38 +55,62 @@ export function enforce(
 
   if (context.bypassed) {
     context.logger.error(
-      `AFFINE_DB_COMPAT_SKIP is set — SUPPRESSING a ${report.verdict} refusal and starting ` +
-        `anyway. This is an incident bypass, not a setting; unset it once resolved. ` +
-        `Reason: ${decision.refusal}`
+      `SUPPRESSING a ${report.verdict} refusal and starting anyway. Reason: ${decision.refusal}`
     );
     return;
   }
 
-  context.logger.error(
-    `refusing to start: ${decision.refusal}\n${renderReport(report)}`
-  );
-  throw new DatabaseIncompatibleError(`refusing to start: ${decision.refusal}`);
+  // Important 1: the report is embedded in the THROWN message, not merely
+  // logged. This is called from `server.ts` while Nest's logger still has
+  // `bufferLogs: true` in effect — the buffer is only flushed inside
+  // `app.listen()`'s callback, which a throw here prevents from ever running.
+  // A log-only report would silently vanish, leaving only Node's raw
+  // "uncaught exception" text. The thrown Error's message survives
+  // regardless of logger state.
+  const message = `refusing to start: ${decision.refusal}\n${renderReport(report)}`;
+  context.logger.error(message);
+  throw new DatabaseIncompatibleError(message);
 }
 
-@Injectable()
-export class DbCompatGuard implements OnApplicationBootstrap {
-  private readonly logger = new Logger(DbCompatGuard.name);
+/**
+ * Runs the compatibility check and enforces it. Called from `server.ts`
+ * between `NestFactory.create()` and `app.listen()` — strictly before every
+ * module `onApplicationBootstrap` hook, including the native migration
+ * runners in `BackendRuntimeProvider` and `StorageRuntimeProvider` that would
+ * otherwise mutate an incompatible database before this guard ever ran.
+ *
+ * Kept here, rather than inlined in `server.ts`, so it stays unit-testable
+ * without booting Nest.
+ */
+export async function assertDatabaseCompatible(
+  app: Pick<INestApplicationContext, 'get'>,
+  logger: Pick<Logger, 'error' | 'log'>
+): Promise<void> {
+  const bypassed = bootGuardBypassed();
+  const service = app.get(DbCompatService);
 
-  constructor(private readonly service: DbCompatService) {}
-
-  async onApplicationBootstrap(): Promise<void> {
-    // Seven existing test files import AppModule and call module.init(), which
-    // runs bootstrap hooks. The guard has its own unit tests; running it there
-    // would add a database query and a failure mode to all of them.
-    if (env.testing) {
-      return;
-    }
-
+  let decision: CompatDecision;
+  try {
     // `check()` is pure since D17 — it writes nothing. Recording adoption is
     // `db stamp`'s job, run by the predeploy script after migrations; the
     // server must never stamp.
-    const decision = await this.service.check();
-
-    enforce(decision, { bypassed: bootGuardBypassed(), logger: this.logger });
+    decision = await service.check();
+  } catch (error) {
+    // Important 3: a crash here — an unreachable database, or a role lacking
+    // SELECT on `_prisma_migrations` — happens before `enforce` is ever
+    // called, so without this, AFFINE_DB_COMPAT_SKIP could never clear it and
+    // an incident would crash-loop with no way out. Fail-closed stays the
+    // default; the bypass exists specifically to end an incident.
+    if (bypassed) {
+      const reason = error instanceof Error ? error.message : String(error);
+      logger.error(
+        `AFFINE_DB_COMPAT_SKIP is set — SUPPRESSING a database compatibility check that ` +
+          `crashed rather than returned a verdict, and starting anyway. Error: ${reason}`
+      );
+      return;
+    }
+    throw error;
   }
+
+  enforce(decision, { bypassed, logger });
 }
