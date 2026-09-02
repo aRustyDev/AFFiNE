@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { DbCompatGuard } from './guard';
 import { DbCompatService } from './service';
 
 /**
@@ -16,6 +17,17 @@ import { DbCompatService } from './service';
   exports: [DbCompatService],
 })
 export class DbCompatModule {}
+
+/**
+ * Adds the boot guard. ONLY `AppModule` may import this (design D10/D14): the
+ * CLI imports `FunctionalityModules`, and a guard reachable from there would
+ * make `db check` refuse to run in exactly the situation it exists for.
+ */
+@Module({
+  imports: [DbCompatModule],
+  providers: [DbCompatGuard],
+})
+export class DbCompatGuardModule {}
 
 export { classifyDdl, type DdlTier } from './classify';
 export { type CompatReport, type Verdict } from './compat';

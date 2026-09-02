@@ -31,6 +31,7 @@ import { AuthModule } from './core/auth';
 import { BackendRuntimeModule } from './core/backend-runtime';
 import { CommentModule } from './core/comment';
 import { ServerConfigModule, ServerConfigResolverModule } from './core/config';
+import { DbCompatGuardModule } from './core/db-compat';
 import { DocStorageModule } from './core/doc';
 import { DocRendererModule } from './core/doc-renderer';
 import { DocServiceModule } from './core/doc-service';
@@ -161,6 +162,12 @@ export function buildAppModule(env: Env) {
   factor
     // basic
     .use(...FunctionalityModules)
+
+    // affine-tc6 boot-time database-compatibility guard. Deliberately NOT
+    // part of `FunctionalityModules`, which `CliAppModule` also imports
+    // (design D10/D14) — a guard reachable from there would make `db check`
+    // refuse to run in exactly the situation it exists for.
+    .use(DbCompatGuardModule)
 
     // enable indexer module on graphql, doc and front service
     .useIf(

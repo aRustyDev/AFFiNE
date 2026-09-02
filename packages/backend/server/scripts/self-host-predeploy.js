@@ -92,7 +92,36 @@ function fixFailedMigrations() {
   }
 }
 
+function runCompatGate() {
+  console.log('checking database compatibility.');
+  execSync('yarn cli db check', {
+    encoding: 'utf-8',
+    env: process.env,
+    stdio: 'inherit',
+  });
+}
+
+function recordAdoption() {
+  console.log('recording the deployment stamp.');
+  execSync('yarn cli db stamp', {
+    encoding: 'utf-8',
+    env: process.env,
+    stdio: 'inherit',
+  });
+}
+
 prepare();
 fixFailedMigrations();
+// Gate BEFORE any migration runs. `execSync` throws on a non-zero exit, so a
+// refusal aborts this script: the k8s initContainer wedges in Init and the old
+// fleet keeps serving, and the compose one-shot fails before the server starts.
+runCompatGate();
 runPrismaMigrations();
 runDataMigrations();
+// Record AFTER, because the stamp lives in `app_configs`, which does not exist
+// on a fresh install until `prisma migrate deploy` has run — `writeStamp` throws
+// Prisma P2021 against it (measured; design D17). The gate cannot move later:
+// refusing after a contracting migration has already been applied is useless.
+// So the two steps have to sit on opposite sides of the migration. `db stamp`
+// is idempotent, and declines to stamp if the verdict refuses.
+recordAdoption();
