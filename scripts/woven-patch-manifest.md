@@ -116,10 +116,39 @@ artifact. Re-run this before deleting the patch.
 ## Merge-time checklist (affine-hn1)
 
 1. `git merge <upstream release tag>` from `woven/main`. Prefer a **stable tag** over `canary`.
-2. **Audit incoming migrations for destructive DDL** — `packages/backend/server/migrations/` and
-   `src/data/migrations/`. A CONTRACT migration (DROP / retype / tighten) makes image rollback
-   impossible: per `affine-tc6` there is no "database is newer than me, refuse to start" guard and
-   no down-migration path. Require a verified-restorable backup before deploying across one.
+2. **Audit incoming migrations for destructive DDL — now mechanical.** This used to be a hand
+   audit of `packages/backend/server/migrations/`, with a note that `affine-tc6` had not yet built
+   a guard. It has. Run:
+
+   ```bash
+   yarn workspace @affine/server data-migration db status
+   ```
+
+   It classifies every pending migration and answers `rollback after applying:` directly:
+
+   - **`BLOCKING`** — an older binary cannot read or write the result, so **image rollback across
+     it is impossible**. Require a **verified-restorable** backup (restorable, not merely taken)
+     before deploying.
+   - **`DESTRUCTIVE`** — data or a constraint is lost, but an older binary still runs. Note it;
+     it does not block rollback.
+   - **`EXPAND`** — additive.
+
+   The tiering is not cosmetic: of this repo's 117 migrations, 8 of the 14 `DESTRUCTIVE` ones carry
+   only `DROP CONSTRAINT`, which an older binary reads and writes straight past. A single
+   destructive/not-destructive flag would report "rollback impossible" for all of them, and an
+   alarm that cries wolf is the one operators learn to pass with the override.
+
+   Deploy time is now guarded too, so this step is a heads-up rather than the only defence:
+   `predeploy` runs `db check`, which refuses a database migrated by a newer binary, refuses a
+   database belonging to another deployment, and refuses to adopt an unstamped populated database
+   across a `BLOCKING` migration without `AFFINE_DB_ADOPT=1`. See
+   `packages/backend/server/src/core/db-compat/README.md`.
+
+   **What this still does not protect.** An image built before `affine-tc6` shipped cannot refuse
+   anything. Rollback across `20260714000001_drop_legacy_permission_and_subscription`, already
+   inside the pinned image, remains unprotected — a verified-restorable backup is the only net for
+   that one.
+
 3. **Resolve conflicts, then re-read the whole file.** A trivial textual conflict can hide a
    semantic break: upstream may delete a symbol fork code still references, and git takes the
    deletion cleanly. `v0.27.4` did exactly this with `OIDC_FETCH_OPTIONS`.

@@ -274,6 +274,63 @@ calls; D5–D10 follow from them plus the grounding measurements.
   prevent. The asymmetry is now a named field, set where it is understood and testable there.
   _Status: accepted (T3 review)._
 
+- **D23 — the boot check runs in `server.ts`, not in an `OnApplicationBootstrap` hook.** The
+  original design put the guard in a lifecycle hook, and I verified twice — in the installed Nest
+  source — that bootstrap hooks complete before the port binds. That was true and **insufficient**:
+  I checked what ran before _listening_, never what ran before the _guard_.
+
+  T5 review measured the real hook order on a live `AppModule` boot:
+
+  ```
+  BOOTSTRAP_ORDER = ["BackendRuntimeProvider", "StorageRuntimeProvider", "DbCompatGuard"]
+  ```
+
+  Both of those call native `runMigrations()` from their own `onApplicationBootstrap`. Nest sorts
+  hooks by descending module distance with a stable tie-break, and the guard module was added after
+  `FunctionalityModules`, so it could never win. An older binary meeting a `DB_AHEAD` database would
+  have two migration runners touch it before the guard refused — in exactly the scenario this bead
+  exists for.
+
+  A second, independent defect pushed the same way: `server.ts` passes `bufferLogs: true`, and
+  `NestFactory.create` (unlike `createApplicationContext`) never calls `flushLogsOnOverride()`, so
+  `app.useLogger()` leaves the buffer attached and `Logger.flush()` is reached only inside
+  `listen()`'s callback. A guard throwing in a bootstrap hook therefore had its entire report
+  **dropped** — reproduced: the only output was a raw Node stack. The bead's criterion is "fails
+  fast with a clear message".
+
+  Both are fixed by hoisting: `NestFactory.create()` runs no lifecycle hooks at all, so a call
+  between it and `listen()` strictly precedes every module hook, and the thrown error now carries
+  the rendered report so it survives any logger state. Three simplifications fall out —
+  `DbCompatGuardModule` is deleted, the `env.testing` short-circuit is unnecessary (tests import
+  `AppModule`, never `server.ts`), and D10 is satisfied structurally rather than by convention,
+  since `src/index.ts` dispatches to `runCli()` or `runServer()`.
+
+  `app.module.ts` still adds `DbCompatModule` — the service-only module, no hook — because
+  `app.get(DbCompatService)` must resolve. Discovered by booting the real server after a full
+  revert: `UnknownElementException: Nest could not find DbCompatService element`. My instruction to
+  revert `app.module.ts` entirely was wrong. _Status: accepted (T5 review)._
+
+  Proven end-to-end afterwards, not just reasoned: booting the real server against a forced
+  `DB_AHEAD` database refused before "Nest application successfully started", wrote **zero rows**
+  to `workspaces`/`users` (so the native runners never ran), and the thrown error's stack carried
+  the full report.
+
+- **D24 — the `predeploy` npm script carries the gate too.** Grounding G1 established that the
+  _infrastructure_ repo's chart invokes `scripts/self-host-predeploy.js`. True — and I never checked
+  this repo's own chart, which runs `yarn predeploy`, a different script:
+  `yarn prisma migrate deploy && yarn cli run`. So upstream's Helm chart, `render.yaml`, and any
+  bare `yarn predeploy` migrated **ungated and unstamped**.
+
+  Fixed in the script itself rather than by repointing it at `self-host-predeploy.js`, which would
+  also pull in private-key generation the cloud chart should not get:
+
+  ```
+  "predeploy": "yarn cli db check && yarn prisma migrate deploy && yarn cli run && yarn cli db stamp"
+  ```
+
+  The lesson generalises: "the deployment calls X" is a claim about **one** deployment. Enumerate
+  the callers. _Status: accepted (T5 review)._
+
 ## Rejected approaches
 
 - **All logic in `self-host-predeploy.js` as plain JS.** No app-graph coupling and it would run

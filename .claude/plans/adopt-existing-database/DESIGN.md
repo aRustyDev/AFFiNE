@@ -260,20 +260,21 @@ Payload:
   against it — measured, see D17. The gate must run before migrations to be worth anything (refusing
   _after_ applying a contracting migration is useless), so the two cannot occupy the same slot.
 
-- **`app.module.ts`**: **two modules** (D14). `DbCompatModule` provides and exports
-  `DbCompatService` only and is safe anywhere, including the minimal CLI context.
-  `DbCompatGuardModule` adds the `OnApplicationBootstrap` guard, and **only `AppModule` imports
-  it — never `FunctionalityModules`**. The CLI imports `FunctionalityModules`, so a guard reachable
-  from there would make `db check` unable to run in precisely the situation it exists for (D10).
+- **`server.ts`**: `await assertDatabaseCompatible(app, logger)` between `NestFactory.create()`
+  and `app.listen()` (D23). **Not** an `OnApplicationBootstrap` hook — that was the original
+  design and it lost a race; see D23 for the measurement. `app.module.ts` adds only
+  `DbCompatModule`, the service-only module with no hook, so `app.get(DbCompatService)` resolves.
 
-  The guard is also **inert under `env.testing`**: seven existing test files import `AppModule`
-  and call `module.init()`, which runs bootstrap hooks. Without the test guard they would each
-  acquire a new database query and a new failure mode.
+  This placement is structurally unreachable from the CLI, which satisfies D10 more strongly than
+  the module split did: `src/index.ts` dispatches to `runCli()` or `runServer()`, so nothing in
+  `server.ts` can be pulled into `CliAppModule`'s graph at all. It also removes the need for an
+  `env.testing` short-circuit — the seven test files that import `AppModule` never reach
+  `server.ts`.
 
-Verified in the installed `@nestjs/core`: `listen()` calls `init()`, which runs
-`callBootstrapHook()` before `httpAdapter.listen()`. A throw in `onApplicationBootstrap`
-propagates out of `init()`, so the port is never bound — refusal is a real refusal, not a
-window during which the server serves traffic.
+Verified in the installed `@nestjs/core`: `NestFactory.create()` runs **no** lifecycle hooks
+(`callInitHook` and `callBootstrapHook` both live inside `NestApplication.init()`, which
+`listen()` calls). So the check strictly precedes every module hook, and the port is never bound
+on a refusal — a real refusal, not a window during which the server serves traffic.
 
 ## Emergency bypass — `AFFINE_DB_COMPAT_SKIP=1` (D11)
 
