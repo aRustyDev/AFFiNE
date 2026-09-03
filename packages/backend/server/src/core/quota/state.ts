@@ -5,8 +5,11 @@ import {
   PrismaClient,
 } from '@prisma/client';
 
-import { EventBus, OnEvent } from '../../base';
+// FORK(woven): configurable self-host quotas (bead affine-vap)
+import { Config, EventBus, OnEvent } from '../../base';
 import { EntitlementService } from '../entitlement';
+// FORK(woven): configurable self-host quotas (bead affine-vap)
+import { applyWovenSelfhostQuota } from './woven-config';
 
 type Quota = Awaited<
   ReturnType<EntitlementService['resolveUserEntitlement']>
@@ -39,7 +42,9 @@ export class QuotaStateService {
   constructor(
     private readonly db: PrismaClient,
     private readonly entitlement: EntitlementService,
-    private readonly event: EventBus
+    private readonly event: EventBus,
+    // FORK(woven): configurable self-host quotas (bead affine-vap)
+    private readonly config: Config
   ) {}
 
   async getWorkspaceQuotaState(workspaceId: string) {
@@ -78,10 +83,12 @@ export class QuotaStateService {
     };
     const now = new Date();
 
+    // FORK(woven): configurable self-host quotas (bead affine-vap)
+    const quota = applyWovenSelfhostQuota(resolved.quota, this.config.woven);
     const update = {
       plan: resolved.plan,
       sourceEntitlementId: entitlement?.id ?? null,
-      ...this.quotaData(resolved.quota),
+      ...this.quotaData(quota),
       usedStorageQuota,
       flags,
       known: true,
@@ -158,7 +165,11 @@ export class QuotaStateService {
           this.entitlement.resolveUserEntitlement(owner.id),
         ])
       : [null, null];
-    const quota = ownerEntitlement?.quota ?? resolved.quota;
+    // FORK(woven): configurable self-host quotas (bead affine-vap)
+    const quota = applyWovenSelfhostQuota(
+      ownerEntitlement?.quota ?? resolved.quota,
+      this.config.woven
+    );
     const plan = ownerEntitlement?.plan ?? resolved.plan;
     const usedStorageQuota = ownerState
       ? ownerState.usedStorageQuota
