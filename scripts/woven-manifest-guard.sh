@@ -18,9 +18,11 @@
 #
 # CHECKS
 #   1. UNMANIFESTED    — an upstream-owned file diverges with no manifest row.
-#   2. STALE ROW       — a manifest row names a path absent from the tree
-#                         (upstream deleted it, or it was renamed and the row
-#                         was not updated).
+#   2. STALE ROW       — a State=PRESENT row names a path absent from the
+#                         tree (upstream deleted or renamed it, or the
+#                         manifest path itself is a typo). A fork's OWN
+#                         deletion is declared via State=REMOVED instead —
+#                         see RESURRECTED and OBSOLETE below.
 #   3. UNPARSEABLE ROW — an in-section table row that is not the header, not
 #                         the separator, and not a well-formed
 #                         `path` | category row (e.g. a missing backtick).
@@ -28,16 +30,32 @@
 #   4. BAD CATEGORY    — a row's category, once markdown emphasis is
 #                         stripped, is not exactly ADDITIVE or FORK-LOCAL CORE
 #                         PATCH. Never guessed as ADDITIVE.
+#   5. BAD STATE       — a row's State, once markdown emphasis is stripped,
+#                         is not empty/PRESENT, REMOVED, or MOVED followed by
+#                         a destination path. Never guessed.
+#   6. RESURRECTED     — a row's State is REMOVED or MOVED, but the path is
+#                         present in the tree anyway — most likely an
+#                         upstream merge restored it.
+#   7. OBSOLETE        — a row's State is REMOVED or MOVED, but the path was
+#                         already absent at the baseline too, so the row no
+#                         longer describes any divergence.
+#   8. MOVED GONE      — a row's State is MOVED, but its destination path is
+#                         not a FILE in the tree — absent outright, the file
+#                         was never put there, or the destination is a typo
+#                         that happens to name an existing directory.
 #   Every offending path is printed, so the fix is mechanical rather than a
-#   re-audit. Rows for files that no longer diverge are reported as a WARNING
-#   only — harmless staleness, not a reason to block a PR.
+#   re-audit. A row that is not an upstream-owned divergence at the current
+#   baseline — the file no longer differs, or upstream deleted/renamed it, or
+#   the row names a fork-owned file — is reported as a WARNING only. It cannot
+#   hide a patch (the path is still in CHANGED, so the outbound leak check
+#   still sees it), so it is not a reason to block a PR.
 #
 # EXIT CODES (contract — see scripts/woven-manifest-guard.test.sh)
 #   0  clean
 #   1  policy violation
 #   2  usage or environment error — unresolvable baseline, missing manifest,
-#      an unparseable manifest row, an unrecognised category, or (under
-#      --outbound) a manifest table with no rows at all.
+#      an unparseable manifest row, an unrecognised category or State, or
+#      (under --outbound) a manifest table with no rows at all.
 #
 # Usage:
 #   scripts/woven-manifest-guard.sh [--base REF] [--head REF] [--manifest PATH]
@@ -49,11 +67,12 @@
 # OUTBOUND (--outbound): fail when the change set touches a file whose manifest
 # row says FORK-LOCAL CORE PATCH — don't leak a fork patch to upstream.
 # --dump-rows is a debugging aid, not a check: it prints every row the parser
-# and classifier saw — `path<TAB>category` for a row that parsed (the category
-# it was actually bucketed as, not just the raw manifest text — an inverted
-# ADDITIVE/FORK-LOCAL CORE PATCH classification would show up here), or
+# and classifier saw — `path<TAB>category<TAB>state<TAB>destination` for a row
+# that parsed (the category it was actually bucketed as, not just the raw
+# manifest text — an inverted ADDITIVE/FORK-LOCAL CORE PATCH classification
+# would show up here; destination is empty unless state is MOVED), or
 # `!UNPARSED<TAB><raw line>` for one that didn't parse — then exits 0 without
-# running any of the four checks above. It answers "what did the parser and
+# running any of the checks above. It answers "what did the parser and
 # classifier actually see?", which is exactly the question you want answered
 # when a row gets rejected, or when you want to confirm a path is paired with
 # the category you think it is before trusting that pairing.
@@ -160,7 +179,23 @@ manifest_rows() {
         gsub(/[*_`]/, "", cat)              # drop markdown emphasis (**, __, `)
         sub(/^[[:space:]]+/, "", cat)
         sub(/[[:space:]]+$/, "", cat)
-        print path "\t" cat
+        # Column 5 (field 6) is State; absent or empty means PRESENT, which is
+        # the STRICTER reading and so the fail-closed default. A MOVED row
+        # carries its destination as a backticked path in the same cell: pull it
+        # out and REMOVE it from the cell BEFORE normalisation, because
+        # normalisation strips backticks and would otherwise leave the path
+        # glued to the keyword, defeating the exact-match compare below.
+        state = (n >= 6 ? f[6] : "")
+        dest = ""
+        if (match(state, /`[^`]+`/)) {
+          dest = substr(state, RSTART + 1, RLENGTH - 2)
+          state = substr(state, 1, RSTART - 1) substr(state, RSTART + RLENGTH)
+        }
+        gsub(/[*_`]/, "", state)
+        sub(/^[[:space:]]+/, "", state)
+        sub(/[[:space:]]+$/, "", state)
+        if (state == "") state = "PRESENT"
+        print path "\t" cat "\t" state "\t" dest
         next
       }
       print "!UNPARSED\t" $0
@@ -184,21 +219,34 @@ UNPARSED="$(printf '%s\n' "$UNPARSED_RAW" | cut -f2-)"
 # CLASSIFIED is built here and is exactly what --dump-rows prints — see below
 # for why FORKLOCAL is derived from it rather than built alongside it.
 BADCAT=""
+BADSTATE=""
 CLASSIFIED=""
-while IFS=$'\t' read -r p c; do
+while IFS=$'\t' read -r p c s d; do
   [ -n "$p" ] || continue
   case "$c" in
-    "FORK-LOCAL CORE PATCH")
-      CLASSIFIED="${CLASSIFIED}${p}"$'\t'"FORK-LOCAL CORE PATCH"$'\n'
-      ;;
-    "ADDITIVE")
-      CLASSIFIED="${CLASSIFIED}${p}"$'\t'"ADDITIVE"$'\n'
-      ;;
+    "FORK-LOCAL CORE PATCH") cc="FORK-LOCAL CORE PATCH" ;;
+    "ADDITIVE")              cc="ADDITIVE" ;;
     *)
       BADCAT="${BADCAT}${p}  [category: ${c:-<empty>}]"$'\n'
-      CLASSIFIED="${CLASSIFIED}${p}"$'\t'"!BADCAT(${c:-<empty>})"$'\n'
+      cc="!BADCAT(${c:-<empty>})"
       ;;
   esac
+  # State is validated independently of Category: the two columns answer
+  # different questions and a bad value in either is a broken manifest.
+  case "$s" in
+    PRESENT|REMOVED)
+      # A destination with no MOVED keyword means a half-edited cell. Ignoring
+      # the path silently is how clause 3 stops applying without anyone noticing.
+      [ -z "$d" ] || BADSTATE="${BADSTATE}${p}  [state: ${s} but carries destination '${d}']"$'\n'
+      ;;
+    MOVED)
+      [ -n "$d" ] || BADSTATE="${BADSTATE}${p}  [state: MOVED with no destination path]"$'\n'
+      ;;
+    *)
+      BADSTATE="${BADSTATE}${p}  [state: ${s:-<empty>}]"$'\n'
+      ;;
+  esac
+  CLASSIFIED="${CLASSIFIED}${p}"$'\t'"${cc}"$'\t'"${s}"$'\t'"${d}"$'\n'
 done <<< "$(printf '%s\n' "$ROWS" | grep -v '^!UNPARSED')"
 
 # FORKLOCAL is DERIVED from CLASSIFIED — the same value --dump-rows prints — so
@@ -206,12 +254,35 @@ done <<< "$(printf '%s\n' "$ROWS" | grep -v '^!UNPARSED')"
 # two in parallel would let them drift, and a fixture over the dump could not
 # see it. Exact field match, never a substring: a marker line must not be
 # mistaken for a classification.
-FORKLOCAL="$(printf '%s' "$CLASSIFIED" | awk -F'\t' '$2=="FORK-LOCAL CORE PATCH"{print $1}' | sort -u)"
+#
+# Clause 3 (affine-83p): a MOVED row's DESTINATION joins the set. The
+# destination did not exist at the baseline, so it is fork-owned and falls
+# outside UPSTREAM_OWNED entirely.
+#
+# This is diagnostic, not the gate: it makes a leak report NAME the
+# destination alongside the source. It used to be the only thing standing
+# between a renamed core patch and an "invisible to outbound" leak — that was
+# true before INBOUND_UNCLEAN existed, and is not true anymore. Today, once
+# the outbound pre-gate consults every inbound verdict (see the INBOUND_UNCLEAN
+# block below), removing `print $4` changes no exit code: a MOVED row whose
+# source is still present trips RESURRECTED; a source genuinely absent from
+# HEAD was present at the baseline, so its own removal is a diff `print $1`
+# alone already puts in LEAKED; and a source absent from both trips OBSOLETE.
+# The pre-gate is what closes the rename hole — this line only makes the
+# report legible once it's already closed. Full case split:
+# .claude/plans/manifest-deletion-state/DESIGN.md, "Post-review correction:
+# the outbound pre-gate must track every inbound verdict".
+FORKLOCAL="$(printf '%s' "$CLASSIFIED" | awk -F'\t' '
+  $2=="FORK-LOCAL CORE PATCH" {
+    print $1
+    if ($3=="MOVED" && $4!="") print $4
+  }' | sort -u)"
 
 # ---- --dump-rows: debugging aid, not a check -------------------------------
-# Prints what the parser AND the classifier saw — `path<TAB>category` per row,
+# Prints what the parser AND the classifier saw — `path<TAB>category<TAB>state
+# <TAB>destination` per row (destination empty unless MOVED),
 # `!UNPARSED<TAB><raw line>` for one that didn't parse — then exits before any
-# of the four checks below can fail the guard. Use it to see exactly what
+# of the checks below can fail the guard. Use it to see exactly what
 # a rejected row looked like, or to confirm a path is paired with the category
 # you think it is before trusting that pairing.
 if [ "$DUMP_ROWS" -eq 1 ]; then
@@ -247,6 +318,16 @@ if [ -n "$BADCAT" ]; then
   err ""
   err "  Each row needs: | \`path\` | **ADDITIVE** or **FORK-LOCAL CORE PATCH** | why | delete when |"
   err "  Column 2 must read ADDITIVE or FORK-LOCAL CORE PATCH once markdown emphasis (*, _, \`) is stripped."
+  exit 2
+fi
+
+if [ -n "$BADSTATE" ]; then
+  err "manifest row(s) in $MANIFEST with an unrecognised State — refusing to guess:"
+  while IFS= read -r l; do [ -n "$l" ] && err "    $l"; done <<< "$BADSTATE"
+  err ""
+  err "  Column 5 must be empty (the file is present), REMOVED (this fork deletes it),"
+  err "  or MOVED followed by the destination as a backticked path, e.g."
+  err "    | \`old/path.ts\` | **ADDITIVE** | why | delete when | MOVED \`new/path.ts\` |"
   exit 2
 fi
 
@@ -299,46 +380,125 @@ comm_rc=$?
 # answer here is a silent policy determination, not a crash.
 [ "$comm_rc" -eq 0 ] || die "comm failed while computing UNMANIFESTED (exit $comm_rc) — an environment error, not a policy determination; refusing to report a possibly-wrong result."
 
-# ---- check 2: rows whose path is gone from the tree ------------------------
+# ---- check 2: resolve each row against the tree, per its State --------------
+# One predicate used to carry four meanings — upstream deleted it, THIS BRANCH
+# deleted it, a rename moved it, or the row is a typo — and collapsed all four
+# into "drop or repoint the row". A fork deletion is a diff against the baseline,
+# so dropping the row just moved the failure to UNMANIFESTED. State separates
+# them: a declared deletion is satisfied by absence, and STALE now fires only
+# where absence really does implicate upstream. (affine-83p)
 STALE=""
 UNDIVERGED=""
-while IFS= read -r p; do
+RESURRECTED=""
+OBSOLETE=""
+MOVED_GONE=""
+
+# path_present is hoisted out of the loop below: it used to be redefined on
+# every iteration. base_present has no such history — it is new with State
+# awareness and was never per-iteration — but it is defined once here anyway,
+# alongside path_present, since both are read on every pass through the loop.
+if [ "$WORKTREE" -eq 1 ]; then
+  path_present() { [ -e "$REPO_ROOT/$1" ]; }
+  # A MOVED destination must resolve to a FILE, not merely exist: [ -e ] is
+  # also true for a directory, so a manifest typo that points State at the
+  # file's own parent directory would otherwise read as "destination present"
+  # and fail open — exactly the error class MOVED_GONE exists to catch. Scoped
+  # to the destination only: source paths (PRESENT/REMOVED/RESURRECTED/
+  # OBSOLETE) keep using path_present, which answers "does this path still
+  # resolve", not "is this specifically a file" — widening path_present itself
+  # would change STALE/RESURRECTED/OBSOLETE semantics too, which is untested
+  # here.
+  file_present() { [ -f "$REPO_ROOT/$1" ]; }
+else
+  path_present() { git cat-file -e "${HEAD_SHA}:${1}" 2>/dev/null; }
+  # Same reasoning as the worktree branch above: `git cat-file -e` succeeds for
+  # a tree (directory) object too, so it cannot tell "destination is a file"
+  # from "destination is a directory that happens to exist". Require the
+  # object type to be exactly `blob`.
+  file_present() { [ "$(git cat-file -t "${HEAD_SHA}:${1}" 2>/dev/null)" = "blob" ]; }
+fi
+base_present() { git cat-file -e "${BASE_SHA}:${1}" 2>/dev/null; }
+
+while IFS=$'\t' read -r p c s d; do
   [ -n "$p" ] || continue
-  # Resolve the row against whatever tree we are judging: the filesystem in
-  # worktree mode, the committed tree otherwise.
-  if [ "$WORKTREE" -eq 1 ]; then
-    path_present() { [ -e "$REPO_ROOT/$1" ]; }
-  else
-    path_present() { git cat-file -e "${HEAD_SHA}:${1}" 2>/dev/null; }
-  fi
-  if ! path_present "$p"; then
-    STALE="${STALE}${p}"$'\n'
-  elif ! printf '%s\n' "$UPSTREAM_OWNED" | grep -qxF -- "$p"; then
-    UNDIVERGED="${UNDIVERGED}${p}"$'\n'
-  fi
-done <<< "$MANIFESTED"
+  case "$s" in
+    PRESENT)
+      if ! path_present "$p"; then
+        STALE="${STALE}${p}"$'\n'
+      elif ! printf '%s\n' "$UPSTREAM_OWNED" | grep -qxF -- "$p"; then
+        UNDIVERGED="${UNDIVERGED}${p}"$'\n'
+      fi
+      ;;
+    REMOVED|MOVED)
+      # MOVED shares every source-side verdict with REMOVED; it only adds the
+      # destination assertion below.
+      if path_present "$p"; then
+        RESURRECTED="${RESURRECTED}${p}"$'\n'
+      elif ! base_present "$p"; then
+        OBSOLETE="${OBSOLETE}${p}"$'\n'
+      fi
+      # file_present, not path_present: a destination that resolves to a
+      # directory must still be reported (see the definitions above). NOTE:
+      # on a Windows checkout, git-bash's filesystem calls accept a backslash
+      # as a path separator, so a destination typo'd with backslashes (e.g.
+      # `pkg\file.ts`) can still resolve as present locally even though the
+      # literal string is wrong. Linux CI treats the backslash as part of the
+      # filename and correctly reports it absent. A green run of this check on
+      # Windows is therefore not full validation of it — CI is authoritative.
+      if [ "$s" = "MOVED" ] && ! file_present "$d"; then
+        MOVED_GONE="${MOVED_GONE}${p} -> ${d}"$'\n'
+      fi
+      ;;
+  esac
+done <<< "$CLASSIFIED"
+
+# ---- accumulate a single "inbound is unclean" signal -----------------------
+# Every one of the five verdicts above is a way the manifest-row-to-tree
+# correspondence can be broken: UNMANIFESTED (no row at all), STALE, RESURRECTED,
+# OBSOLETE, MOVED_GONE. Outbound (below) must refuse to judge unless ALL FIVE
+# are clean — not just the two that existed before affine-83p. Rather than have
+# the outbound gate re-enumerate five names (the second enumeration is exactly
+# what let affine-83p ship a gate that checked only two of them — see the
+# OUTBOUND comment below), every verdict OR's into one flag here, and outbound
+# consults only the flag. A verdict this guard grows in the future only has to
+# set INBOUND_UNCLEAN=1 in this block; there is no second site left to forget.
+#
+# UNDIVERGED is deliberately excluded and always will be: a row for a file that
+# no longer differs from the baseline cannot hide a patch (affine-hn1.4), so it
+# stays a warning on both sides, never a gate.
+INBOUND_UNCLEAN=0
+[ -n "$UNMANIFESTED" ] && INBOUND_UNCLEAN=1
+[ -n "$STALE" ]        && INBOUND_UNCLEAN=1
+[ -n "$RESURRECTED" ]  && INBOUND_UNCLEAN=1
+[ -n "$OBSOLETE" ]     && INBOUND_UNCLEAN=1
+[ -n "$MOVED_GONE" ]   && INBOUND_UNCLEAN=1
 
 # ---- OUTBOUND mode: don't leak a fork patch to upstream --------------------
 # Asks an ADDITIONAL question to the inbound one, over the same inputs: not just
 # "is this divergence declared?" but "is this change set carrying something
-# marked NEVER-upstream?". Runs after BOTH inbound checks — UNMANIFESTED and
-# STALE — rather than just the first: outbound requires the branch to be
-# INBOUND-CLEAN, not merely unmanifested-clean. A stale row's category no
-# longer describes this tree either — for example a rename (CHANGED above is
-# taken with --no-renames precisely so a rename cannot hide the old path from
-# this diff) leaves the manifested path absent from the tree, and the row's
-# classification becomes unverifiable — the same "absence is ambiguous" shape
+# marked NEVER-upstream?". Runs only once INBOUND_UNCLEAN is 0 — outbound
+# requires the branch to be INBOUND-CLEAN on EVERY inbound verdict, not merely
+# unmanifested-clean. A row whose meaning the tree can no longer confirm —
+# stale, resurrected, obsolete, or a MOVED destination that doesn't resolve —
+# leaves its classification unverifiable, the same "absence is ambiguous" shape
 # the unmanifested check exists to close on the other side.
 #
-# FORKLOCAL is derived from the manifest, so a row the parser cannot read
-# silently leaves the set, and an empty set looks exactly like "nothing to
-# leak". An unreadable or stale row makes gating here fail closed by
-# construction rather than by having been anticipated. It also means the
-# checks can never disagree: a branch cannot be "safe to send upstream" while
-# carrying a divergence the fork has not declared, or a row whose meaning this
-# tree can no longer confirm.
+# FORKLOCAL is derived from the manifest, so a row the parser cannot read, or
+# whose tree correspondence has broken some other way, silently leaves the
+# set — and an empty set looks exactly like "nothing to leak". Gating on
+# INBOUND_UNCLEAN makes that fail closed by construction rather than by
+# anticipation: see .claude/plans/upstream-leak-guard/DESIGN.md, "Outbound is
+# an ADDITIONAL question, not a separate one", whose whole point is to refuse
+# enumerating failure modes so a NEW one fails closed automatically. affine-83p
+# added three new modes (RESURRECTED, OBSOLETE, MOVED_GONE) and, for one
+# commit, left this gate consulting only the original two (UNMANIFESTED,
+# STALE) — a MOVED row whose declared destination didn't match where the
+# FORK-LOCAL content actually landed reached rc 0 "safe to send upstream" here
+# while inbound correctly reported MOVED_GONE. The two directions disagreed,
+# which is supposed to be impossible: gating on the single accumulated flag
+# instead of naming checks here is the fix, not a patch over that one path.
 if [ "$OUTBOUND" -eq 1 ]; then
-  if [ -n "$UNMANIFESTED" ] || [ -n "$STALE" ]; then
+  if [ "$INBOUND_UNCLEAN" -eq 1 ]; then
     if [ -n "$UNMANIFESTED" ]; then
       err "cannot judge this change set: upstream-owned file(s) with no manifest row:"
       while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$UNMANIFESTED"
@@ -350,10 +510,33 @@ if [ "$OUTBOUND" -eq 1 ]; then
       err "cannot judge this change set: manifest row(s) whose path no longer exists in the tree:"
       while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$STALE"
       err ""
-      err "  A stale row's category no longer describes this tree — the file may have"
-      err "  been renamed (a rename would otherwise hide the old path from this diff)"
-      err "  or deleted. Update or drop the row in ${MANIFEST#"$REPO_ROOT/"} before this"
-      err "  branch can be judged safe for upstream."
+      err "  A stale row's category no longer describes this tree. If upstream deleted or"
+      err "  renamed the file, re-point scripts/woven-upstream-baseline per the merge"
+      err "  checklist first, then drop or repoint the row — until the baseline moves, the"
+      err "  path is still upstream-owned and dropping the row only trades this failure"
+      err "  for UNMANIFESTED. If THIS BRANCH deleted it instead, set the row's State to"
+      err "  REMOVED (or MOVED \`new/path\`) and run again."
+    fi
+    if [ -n "$RESURRECTED" ]; then
+      err "cannot judge this change set: manifest row(s) marked removed or moved, but the path is present:"
+      while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$RESURRECTED"
+      err ""
+      err "  A RESURRECTED row's category no longer describes this tree until it is"
+      err "  resolved — delete the file again, or clear the State cell back to empty."
+    fi
+    if [ -n "$OBSOLETE" ]; then
+      err "cannot judge this change set: manifest row(s) marked removed or moved, but absent from the baseline too:"
+      while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$OBSOLETE"
+      err ""
+      err "  An OBSOLETE row no longer describes any divergence. Drop the row."
+    fi
+    if [ -n "$MOVED_GONE" ]; then
+      err "cannot judge this change set: MOVED row(s) whose destination is not in the tree:"
+      while IFS= read -r l; do [ -n "$l" ] && err "    $l"; done <<< "$MOVED_GONE"
+      err ""
+      err "  Until the destination resolves, clause 3 cannot confirm the FORK-LOCAL patch"
+      err "  is actually there. Point State at the path the file actually has now, or use"
+      err "  REMOVED if the fork dropped it rather than relocating it."
     fi
     exit 1
   fi
@@ -401,14 +584,53 @@ fi
 
 if [ -n "$STALE" ]; then
   rc=1
-  err "STALE manifest row(s) in ${MANIFEST#"$REPO_ROOT/"} — the path no longer exists in the tree; upstream probably deleted or renamed it:"
+  err "STALE manifest row(s) in ${MANIFEST#"$REPO_ROOT/"} — the path is not in the tree:"
   while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$STALE"
-  err "  Drop the row, or repoint it at the new path."
+  err "  Two causes, two different fixes:"
+  err "    * upstream deleted or renamed it  -> drop the row, or repoint it at the new path"
+  err "      (re-point scripts/woven-upstream-baseline first, per the merge checklist —"
+  err "      until then the path is still in the baseline, and dropping the row only"
+  err "      trades this failure for UNMANIFESTED)"
+  err "    * THIS BRANCH deleted it          -> keep the row and set State to REMOVED"
+  err "      (a rename: State = MOVED \`new/path\`)"
+fi
+
+if [ -n "$RESURRECTED" ]; then
+  rc=1
+  err "RESURRECTED — ${MANIFEST#"$REPO_ROOT/"} says this fork removes these files, but they are present:"
+  while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$RESURRECTED"
+  err "  An upstream merge probably restored them. Either delete them again, or —"
+  err "  if the fork now keeps upstream's version — clear the State cell back to empty."
+fi
+
+if [ -n "$OBSOLETE" ]; then
+  rc=1
+  err "OBSOLETE row(s) in ${MANIFEST#"$REPO_ROOT/"} — marked REMOVED, but absent from the baseline too:"
+  while IFS= read -r p; do [ -n "$p" ] && err "    $p"; done <<< "$OBSOLETE"
+  err "  Either upstream deleted the file too, or the path was never right (a typo) —"
+  err "  either way the row no longer describes a divergence. Drop the row."
+fi
+
+if [ -n "$MOVED_GONE" ]; then
+  rc=1
+  err "MOVED row(s) in ${MANIFEST#"$REPO_ROOT/"} whose destination is not in the tree:"
+  while IFS= read -r l; do [ -n "$l" ] && err "    $l"; done <<< "$MOVED_GONE"
+  err "  Point State at the path the file actually has now, or use REMOVED if the"
+  err "  fork dropped it rather than relocating it."
 fi
 
 if [ -n "$UNDIVERGED" ]; then
-  warn "manifest row(s) for files that no longer diverge from the baseline (not fatal — consider dropping the row):"
+  # The path is present, but it is not in UPSTREAM_OWNED — which folds in two
+  # different situations, so the message must name both rather than assert the
+  # first. Saying only "no longer diverges" is wrong for the second: after
+  # upstream deletes or renames a file the fork had patched, the fork's copy
+  # still differs from what upstream shipped — upstream simply has no such file
+  # at this baseline any more. (affine-83p)
+  warn "manifest row(s) that are not an upstream-owned divergence at this baseline (not fatal — consider dropping the row):"
   while IFS= read -r p; do [ -n "$p" ] && warn "    $p"; done <<< "$UNDIVERGED"
+  warn "  Either the file no longer differs from upstream, or it is no longer"
+  warn "  upstream-owned — upstream deleted or renamed it, or the row names a"
+  warn "  fork-owned file. Either way the row describes nothing this baseline has."
 fi
 
 if [ "$rc" -eq 0 ]; then

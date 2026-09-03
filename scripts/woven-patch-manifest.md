@@ -4,10 +4,30 @@ Deliverable of bead **affine-hn1** (upstream merge & fork-drift management). Thi
 tracked list of every **upstream-owned** file the Woven fork deliberately diverges on, with
 rationale and category. Categories come from **affine-cm9** (fork strategy):
 
-| Category                  | Meaning                                                                                          | Upstreamable? |
-| ------------------------- | ------------------------------------------------------------------------------------------------ | ------------- |
-| **ADDITIVE**              | New fork-owned files (`scripts/woven-*`, new plugins/modules/blocks, config flags). Rebase-safe. | Sometimes     |
-| **FORK-LOCAL CORE PATCH** | Changes upstream _behavior_ — member/seat limits, core auth/quota/permission.                    | **NEVER**     |
+| Category                  | Meaning                                                                                                                                               | Upstreamable? |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| **ADDITIVE**              | Adds to an upstream-owned file without changing upstream _behavior_ — a new workflow trigger, a fork-only composite in a dev/test CLI, a config flag. | Sometimes     |
+| **FORK-LOCAL CORE PATCH** | Changes upstream _behavior_ — member/seat limits, core auth/quota/permission.                                                                         | **NEVER**     |
+
+Both categories are divergences on **upstream-owned** files, and neither is rebase-safe — every row
+here is something the next upstream merge can silently drop or resurrect, which is why the table
+exists. The category does not record how risky a merge is; it records **upstreamability**, and that
+turns on the one question above: does the change alter upstream's behavior? A brand-new fork-owned
+file is therefore _not_ ADDITIVE — it belongs to no category here at all, because it is not tracked
+in this table (see below).
+
+A row also carries a **State** (`affine-83p`), declaring whether the fork's own edit is present in
+the tree, or is itself a deletion or rename:
+
+| State                | Meaning                                                                               |
+| -------------------- | ------------------------------------------------------------------------------------- |
+| _(empty)_            | The file is present in the tree and diverges from upstream. The default.              |
+| **REMOVED**          | This fork deletes the upstream-owned file. The row stays; absence is the declaration. |
+| **MOVED** `new/path` | This fork relocates it. The destination is checked, and inherits the row's category.  |
+
+A deletion or rename is still a divergence — arguably the most rebase-dangerous
+kind, because an upstream edit to a file the fork deleted resurrects it on the
+next merge. Declare it here rather than dropping the row (`affine-83p`).
 
 Only **upstream-owned** files belong in the table below. Fork-owned additions are rebase-safe by
 construction and are not tracked here — the CI guard's job is to fail when an upstream-owned file
@@ -37,9 +57,10 @@ judge a branch that fails them. A manifest row the parser cannot read would
 otherwise silently drop its file out of the FORK-LOCAL set, so the leak check
 would pass by omission; requiring inbound-clean first means that class of parser
 gap fails closed instead. `--dump-rows` prints exactly what the parser and
-classifier saw for each row — path and resolved category, or the raw line if it
-did not parse — useful for debugging a rejected row or confirming a path is
-paired with the category you expect.
+classifier saw for each row — tab-separated path, resolved category, resolved
+State, and a `MOVED` row's destination (empty otherwise) — or the raw line if it
+did not parse. Useful for debugging a rejected row, or for confirming a path is
+paired with the category and State you expect.
 
 To prepare a contribution for upstream, do not branch from `woven/main` — it
 carries every fork-local patch the fork has ever made. Use:
@@ -58,11 +79,11 @@ keeps that exact miss as a regression fixture.
 
 ## Diverged upstream-owned files
 
-| File                                                          | Category                  | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Delete when                                                                                      |
-| ------------------------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `packages/backend/server/src/plugins/oauth/providers/oidc.ts` | **FORK-LOCAL CORE PATCH** | OIDC must reach an internal, **org-CA-signed** issuer (Zitadel `id.auth.woven`). `safeFetch` is the native Rust path (`base/utils/ssrf.ts` → `native/src/safe_fetch.rs` → the `safefetch` crate), built on rustls with **no native-certs feature**, so it trusts webpki roots only and **ignores `NODE_EXTRA_CA_CERTS`**. The patch routes OIDC discovery, JWKS and token/userinfo through Node `fetch`, which does honor it. Touches core auth behavior ⇒ never upstream.                                                                                                             | `affine-mbv` (hardened outbound fetch service) lands with **configurable CA trust**              |
-| `.github/workflows/build-test.yml`                            | **ADDITIVE**              | Adds `workflow_dispatch:` to the `on:` block, nothing else. Upstream's `push:` list covers only its own release branches, so `woven/main` has no automatic run of this workflow while `woven-publish-image.yml` _does_ fire on it — a fork merge can therefore reach GHCR untested, which is what happened to the v0.27.4 sync. One added trigger, no job or step changes, so it is low-conflict on future merges and is a plausible upstream contribution.                                                                                                                            | upstream gains its own `workflow_dispatch`, or `woven/main` is added to a `push:` list           |
-| `packages/backend/server/src/seed/index.ts`                   | **ADDITIVE**              | Adds a fork-local `WovenWorkspace` composite to the `seed` CLI (owner + members + one root-doc workspace), delegating to `__tests__/fixtures/woven-workspace.ts`, plus the matching help text. Intercepts before the `Mockers` registry lookup because the composite is not a single Mocker. **Dev/test tooling only — it changes no runtime product behavior**, which is why this is ADDITIVE and not a core patch. Was MISSED when this manifest was first written (`eac15e21bd` listed only `oidc.ts`) even though the divergence audit had identified it; added at `affine-hn1.1`. | the composite moves to a fork-owned file that upstream's `seed` CLI can discover without an edit |
+| File                                                          | Category                  | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Delete when                                                                                      | State |
+| ------------------------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ----- |
+| `packages/backend/server/src/plugins/oauth/providers/oidc.ts` | **FORK-LOCAL CORE PATCH** | OIDC must reach an internal, **org-CA-signed** issuer (Zitadel `id.auth.woven`). `safeFetch` is the native Rust path (`base/utils/ssrf.ts` → `native/src/safe_fetch.rs` → the `safefetch` crate), built on rustls with **no native-certs feature**, so it trusts webpki roots only and **ignores `NODE_EXTRA_CA_CERTS`**. The patch routes OIDC discovery, JWKS and token/userinfo through Node `fetch`, which does honor it. Touches core auth behavior ⇒ never upstream.                                                                                                             | `affine-mbv` (hardened outbound fetch service) lands with **configurable CA trust**              |       |
+| `.github/workflows/build-test.yml`                            | **ADDITIVE**              | Adds `workflow_dispatch:` to the `on:` block, nothing else. Upstream's `push:` list covers only its own release branches, so `woven/main` has no automatic run of this workflow while `woven-publish-image.yml` _does_ fire on it — a fork merge can therefore reach GHCR untested, which is what happened to the v0.27.4 sync. One added trigger, no job or step changes, so it is low-conflict on future merges and is a plausible upstream contribution.                                                                                                                            | upstream gains its own `workflow_dispatch`, or `woven/main` is added to a `push:` list           |       |
+| `packages/backend/server/src/seed/index.ts`                   | **ADDITIVE**              | Adds a fork-local `WovenWorkspace` composite to the `seed` CLI (owner + members + one root-doc workspace), delegating to `__tests__/fixtures/woven-workspace.ts`, plus the matching help text. Intercepts before the `Mockers` registry lookup because the composite is not a single Mocker. **Dev/test tooling only — it changes no runtime product behavior**, which is why this is ADDITIVE and not a core patch. Was MISSED when this manifest was first written (`eac15e21bd` listed only `oidc.ts`) even though the divergence audit had identified it; added at `affine-hn1.1`. | the composite moves to a fork-owned file that upstream's `seed` CLI can discover without an edit |       |
 
 ### `oidc.ts` — measured justification
 
