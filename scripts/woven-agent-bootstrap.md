@@ -214,11 +214,25 @@ The prepared branch is a starting point: review, cherry-pick and squash it as
 needed. The clean result the preparer reports describes the branch at creation,
 not the branch you eventually push — which is why the last two exist.
 
-`--outbound` only judges a branch that is already inbound-clean: it runs the
-unmanifested-row and stale-row checks first and refuses to judge a branch that
-fails them, so a manifest row the parser cannot read can never silently pass a
-fork-local patch through. An unrecognised category in
+`--outbound` only judges a branch that is already inbound-clean: it refuses to
+answer unless **every** inbound verdict is clean, via a single accumulated
+`INBOUND_UNCLEAN` flag, so a manifest row the parser cannot read — or one whose
+declared State no longer describes the tree — can never silently pass a fork-local
+patch through. That is deliberately a single flag set at one site rather than a
+list of verdict names repeated at the gate: `affine-83p` added three new inbound
+verdicts and a code review caught that the gate had only been taught two of them,
+which is exactly the drift a second list invites. **Any new inbound verdict must OR
+into that flag.** An unrecognised category or State in
 `scripts/woven-patch-manifest.md` exits 2 rather than being assumed ADDITIVE.
+
+**Know what the guard does _not_ cover** before relying on it: decision
+`affine-3zk` records the measured coverage grid. In short — the guard gates one
+axis, what the fork does to an upstream-owned file. What _upstream_ did is a
+warning only (it sees a single baseline snapshot, so "upstream deleted this file"
+and "this row names a fork-owned file" are indistinguishable), and the content of
+fork-owned files is not category-tracked at all. Whether an upstream deletion or
+rename of a patched file should escalate from warning to gate is open, as
+`affine-vaz`.
 
 #### Opening the PR
 
