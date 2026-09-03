@@ -54,6 +54,37 @@ expect_names() {
   done
 }
 
+# --- live-tree facts, DERIVED not hardcoded (affine-w8z) ---------------------
+# The manifest exists to accumulate rows: every new fork-local core patch adds
+# one. So no fixture may assume how many rows it currently has, nor how many
+# upstream-owned files this tree currently diverges on. Earlier revisions of
+# this file hardcoded "3" in five places, which meant the FIRST branch to add a
+# legitimate row turned the Guard fixtures job red and — because the
+# manifest-guard job declares `needs: fixtures` — blocked the inbound check
+# behind it. affine-vap hit exactly that.
+#
+# Both values come from the guard's own output, so they track whatever this
+# branch actually carries.
+LIVE_ROWS="$("$GUARD" --dump-rows --head HEAD 2>/dev/null | grep -cF "$(printf '\t')")"
+LIVE_UPSTREAM_OWNED="$(
+  "$GUARD" --head HEAD 2>&1 |
+    sed -n 's/.*· \([0-9]\{1,\}\) upstream-owned ·.*/\1/p' | head -1
+)"
+
+case "$LIVE_ROWS" in
+  '' | 0 | *[!0-9]*)
+    echo "FATAL: could not derive the live manifest row count (got '$LIVE_ROWS')" >&2
+    exit 2
+    ;;
+esac
+case "$LIVE_UPSTREAM_OWNED" in
+  '' | *[!0-9]*)
+    echo "FATAL: could not derive the guard's upstream-owned count (got '$LIVE_UPSTREAM_OWNED')" >&2
+    exit 2
+    ;;
+esac
+echo "-- derived from this tree: $LIVE_ROWS manifest row(s), $LIVE_UPSTREAM_OWNED upstream-owned"
+
 # --- affine-83p shared fixture helpers ---------------------------------------
 MOVED_DEST="packages/backend/server/src/plugins/oauth/providers/woven-oidc.ts"
 
@@ -241,16 +272,37 @@ echo "-- dump-rows: real manifest pairs each path with its actual classified cat
 run_guard --dump-rows --head HEAD
 expect_rc 0 "clean"
 DUMP_LINES="$(grep -F "$(printf '\t')" "$OUT" | sort)"
-# The live manifest has no State column, so every row defaults to PRESENT with
-# no destination — the fail-closed default this whole change must preserve.
-EXPECT_LINES="$(printf '%s\n' \
+# These three rows are the fork's founding divergences and their categories are
+# load-bearing, so each is pinned individually. What is NOT pinned is the row
+# COUNT — the manifest is designed to grow, and asserting set equality here is
+# what made every new row fail this suite (affine-w8z). An inverted case arm in
+# the guard still gets caught: it would flip these pairings, and each is checked.
+EXPECT_ROWS="$(printf '%s\n' \
   "$OIDC_PATH"$'\t'"FORK-LOCAL CORE PATCH"$'\t'"PRESENT"$'\t' \
   ".github/workflows/build-test.yml"$'\t'"ADDITIVE"$'\t'"PRESENT"$'\t' \
-  "$SEED_PATH"$'\t'"ADDITIVE"$'\t'"PRESENT"$'\t' | sort)"
-if [ "$DUMP_LINES" = "$EXPECT_LINES" ]; then
-  ok "dump-rows pairs all 3 rows with the correct classified category, nothing more or less"
+  "$SEED_PATH"$'\t'"ADDITIVE"$'\t'"PRESENT"$'\t')"
+missing=0
+while IFS= read -r want; do
+  [ -z "$want" ] && continue
+  if ! printf '%s\n' "$DUMP_LINES" | grep -qxF -- "$want"; then
+    bad "dump-rows is missing or mis-pairs: $want"
+    missing=1
+  fi
+done <<EOF
+$EXPECT_ROWS
+EOF
+if [ "$missing" -eq 0 ]; then
+  ok "dump-rows pairs each founding row with the correct classified category and State"
 else
-  bad "dump-rows output does not match the expected (path, category) pairing"
+  dump
+fi
+# Length is still checked, against the derived count rather than a literal, so a
+# parser that silently dropped rows is still caught.
+DUMP_COUNT="$(printf '%s\n' "$DUMP_LINES" | grep -cF "$(printf '\t')")"
+if [ "$DUMP_COUNT" -eq "$LIVE_ROWS" ]; then
+  ok "dump-rows printed every row the parser saw ($LIVE_ROWS), none silently dropped"
+else
+  bad "dump-rows printed $DUMP_COUNT rows but the parser saw $LIVE_ROWS"
   dump
 fi
 
@@ -356,8 +408,8 @@ else
 
   # (b) pins --no-renames: the guard's own upstream-owned count, driven by its
   # own CHANGED computation, not a re-derivation of git's behaviour.
-  if grep -qF -- "3 upstream-owned" "$OUT"; then
-    ok "--no-renames kept the source path ($OIDC_PATH) in the guard's own CHANGED"
+  if grep -qF -- "$LIVE_UPSTREAM_OWNED upstream-owned" "$OUT"; then
+    ok "--no-renames kept the source path ($OIDC_PATH) in CHANGED ($LIVE_UPSTREAM_OWNED upstream-owned)"
   else
     bad "guard's upstream-owned count does not reflect the source path -- --no-renames may be missing"
     dump
@@ -739,7 +791,7 @@ else
   # (oidc.ts existed at the baseline), and the manifest's row count is
   # unaffected by mark_removed (still 3 rows) -- pins this as the intended
   # baseline-minus-one-FORK-LOCAL-file shape, not some other reason to fail.
-  if grep -qF -- "1 changed vs baseline · 1 upstream-owned · 3 manifest row(s)" "$OUT"; then
+  if grep -qF -- "1 changed vs baseline · 1 upstream-owned · $LIVE_ROWS manifest row(s)" "$OUT"; then
     ok "fixture commit really is baseline minus the one FORK-LOCAL file (1 upstream-owned, 3 rows)"
   else
     bad "fixture commit does not match the intended REMOVED-FORK-LOCAL shape"; dump
@@ -772,7 +824,7 @@ else
   # Shape: exactly one change vs baseline, that one change IS upstream-owned
   # (seed/index.ts existed at the baseline) -- rules out the degenerate "empty
   # diff" failure mode write-tree/commit-tree would otherwise absorb silently.
-  if grep -qF -- "1 changed vs baseline · 1 upstream-owned · 3 manifest row(s)" "$OUT"; then
+  if grep -qF -- "1 changed vs baseline · 1 upstream-owned · $LIVE_ROWS manifest row(s)" "$OUT"; then
     ok "fixture commit really is baseline minus the one ADDITIVE file (1 upstream-owned, 3 rows)"
   else
     bad "fixture commit does not match the intended REMOVED-ADDITIVE shape"; dump
@@ -794,41 +846,80 @@ fi
 # is the pre-affine-83p behaviour. Built by hand at four columns so it cannot
 # drift when the live manifest gains its fifth.
 echo "-- compat: four-column manifest behaves exactly as before"
+# DERIVED from the live manifest by dropping its State column, not hand-built
+# from a fixed path list (affine-w8z). The subject here is the parser's column
+# handling -- absent fifth column must default to PRESENT -- not this tree's
+# divergence set. A hand-built list of three paths made this fixture assert,
+# via `--head HEAD` below, that the repo diverges on exactly those three, so it
+# failed on the first branch to add a legitimate row.
 {
   echo '## Diverged upstream-owned files'
   echo
   echo '| File | Category | Why | Delete when |'
   echo '| ---- | -------- | --- | ----------- |'
-  echo "| \`$OIDC_PATH\` | **FORK-LOCAL CORE PATCH** | x | y |"
-  echo "| \`$SEED_PATH\` | **ADDITIVE** | x | y |"
-  echo '| `.github/workflows/build-test.yml` | **ADDITIVE** | x | y |'
+  # Data rows from the "## Diverged upstream-owned files" section ONLY, reduced
+  # to four columns by dropping the last field. The section scope matters: this
+  # file has other tables with backticked first cells (the category and State
+  # legends, and the oidc.ts measurement table), and a broader selector pulls
+  # those in as bogus rows.
+  awk -F'|' '
+    /^## Diverged upstream-owned files/ { insec = 1; next }
+    insec && /^#/                       { insec = 0 }
+    insec && /^\|[[:space:]]*`/ {
+      out = "";
+      for (i = 2; i <= NF - 2; i++) out = out "|" $i;
+      print out "|";
+    }
+  ' "$MANIFEST"
 } >"$TMPDIR_T/m-fourcol.md"
 run_guard --manifest "$TMPDIR_T/m-fourcol.md" --head HEAD
 expect_rc 0 "four-column manifest is clean"
 
-# expect_rc 0 alone is weak: it would also pass if the hand-built manifest
-# silently failed to parse and produced zero rows (an empty MANIFESTED list is
-# only a WARNING inbound, not a failure -- see check 1 above), or if the three
-# rows were misread into the wrong category. Pin the SHAPE too, the same way
-# fixtures #12 and #17 do: the guard's own row count, and --dump-rows's actual
-# per-row classification.
-if grep -qF -- "3 manifest row(s)" "$OUT"; then
-  ok "four-column manifest parsed all 3 rows, not silently zero"
+# expect_rc 0 alone is weak: it would also pass if the derived manifest silently
+# failed to parse and produced zero rows (an empty MANIFESTED list is only a
+# WARNING inbound, not a failure -- see check 1 above), or if the rows were
+# misread into the wrong category. Pin the SHAPE too, the same way fixtures #12
+# and #17 do: the guard's own row count, and --dump-rows's per-row
+# classification. The count is the derived one, so the reduction is proven
+# lossless -- dropping a column must not drop a row.
+if grep -qF -- "$LIVE_ROWS manifest row(s)" "$OUT"; then
+  ok "four-column manifest parsed all $LIVE_ROWS rows, not silently zero"
 else
-  bad "guard did not report 3 manifest rows for the four-column manifest"; dump
+  bad "guard did not report $LIVE_ROWS manifest rows for the four-column manifest"; dump
 fi
 
 run_guard --dump-rows --manifest "$TMPDIR_T/m-fourcol.md"
 expect_rc 0 "dump-rows on the four-column manifest"
 FOURCOL_DUMP="$(grep -F "$(printf '\t')" "$OUT" | sort)"
-EXPECT_FOURCOL_DUMP="$(printf '%s\n' \
-  "$OIDC_PATH"$'\t'"FORK-LOCAL CORE PATCH"$'\t'"PRESENT"$'\t' \
-  ".github/workflows/build-test.yml"$'\t'"ADDITIVE"$'\t'"PRESENT"$'\t' \
-  "$SEED_PATH"$'\t'"ADDITIVE"$'\t'"PRESENT"$'\t' | sort)"
-if [ "$FOURCOL_DUMP" = "$EXPECT_FOURCOL_DUMP" ]; then
-  ok "dump-rows shows all 3 rows as PRESENT with an empty destination -- the absent fifth column defaults correctly"
+# Every row must come back PRESENT with an empty destination — that is the
+# migration guarantee. Asserted over whatever rows exist rather than three
+# named ones, and cross-checked against the five-column dump so the two agree
+# on category for every path.
+fourcol_bad=0
+FOURCOL_COUNT="$(printf '%s\n' "$FOURCOL_DUMP" | grep -cF "$(printf '\t')")"
+if [ "$FOURCOL_COUNT" -ne "$LIVE_ROWS" ]; then
+  bad "four-column dump-rows printed $FOURCOL_COUNT rows, expected $LIVE_ROWS"
+  fourcol_bad=1
+fi
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  case "$line" in
+    *"$(printf '\t')PRESENT$(printf '\t')") ;;
+    *) bad "four-column row did not default to PRESENT with an empty destination: $line"
+       fourcol_bad=1 ;;
+  esac
+done <<EOF
+$FOURCOL_DUMP
+EOF
+if [ "$fourcol_bad" -eq 0 ]; then
+  ok "all $LIVE_ROWS rows come back PRESENT with an empty destination -- the absent fifth column defaults correctly"
 else
-  bad "dump-rows output for the four-column manifest does not match the expected all-PRESENT pairing"
+  dump
+fi
+if [ "$FOURCOL_DUMP" = "$DUMP_LINES" ]; then
+  ok "four- and five-column dumps agree exactly, so dropping State changed no classification"
+else
+  bad "four-column dump differs from the five-column dump beyond the State column"
   dump
 fi
 
