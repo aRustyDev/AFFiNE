@@ -4,10 +4,17 @@ Deliverable of bead **affine-hn1** (upstream merge & fork-drift management). Thi
 tracked list of every **upstream-owned** file the Woven fork deliberately diverges on, with
 rationale and category. Categories come from **affine-cm9** (fork strategy):
 
-| Category                  | Meaning                                                                                          | Upstreamable? |
-| ------------------------- | ------------------------------------------------------------------------------------------------ | ------------- |
-| **ADDITIVE**              | New fork-owned files (`scripts/woven-*`, new plugins/modules/blocks, config flags). Rebase-safe. | Sometimes     |
-| **FORK-LOCAL CORE PATCH** | Changes upstream _behavior_ — member/seat limits, core auth/quota/permission.                    | **NEVER**     |
+| Category                  | Meaning                                                                                                                                               | Upstreamable? |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| **ADDITIVE**              | Adds to an upstream-owned file without changing upstream _behavior_ — a new workflow trigger, a fork-only composite in a dev/test CLI, a config flag. | Sometimes     |
+| **FORK-LOCAL CORE PATCH** | Changes upstream _behavior_ — member/seat limits, core auth/quota/permission.                                                                         | **NEVER**     |
+
+Both categories are divergences on **upstream-owned** files, and neither is rebase-safe — every row
+here is something the next upstream merge can silently drop or resurrect, which is why the table
+exists. The category does not record how risky a merge is; it records **upstreamability**, and that
+turns on the one question above: does the change alter upstream's behavior? A brand-new fork-owned
+file is therefore _not_ ADDITIVE — it belongs to no category here at all, because it is not tracked
+in this table (see below).
 
 A row also carries a **State** (`affine-83p`), declaring whether the fork's own edit is present in
 the tree, or is itself a deletion or rename:
