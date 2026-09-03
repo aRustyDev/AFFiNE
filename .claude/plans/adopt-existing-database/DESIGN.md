@@ -3,12 +3,14 @@
 > **FORK-LOCAL. Additive; the guard core is fork-owned (`src/core/db-compat/`), with three
 > ADDITIVE rows added to `scripts/woven-patch-manifest.md` for the upstream-owned files it
 > wires into. Per `affine-cm9` (fork strategy) and `affine-hn1` (upstream-leak guard).**
-> Status: **DESIGN APPROVED 2026-08-31. Implementation in progress — T1 and T2 landed
-> 2026-09-01; T3 in review, T4–T6 outstanding.** Design changes made during implementation are
-> recorded as D4a/D4b (T1 review), D15/D16 (T2 review) and **D17–D20 (T3 review, including a
-> showstopper: the gate crashed on every fresh install)**. The verdict table and wiring below
-> reflect them.
-> Bead: `affine-tc6` (P1, open, owner adam). Subtasks `.1`–`.6` = T1–T6 below, to be filed.
+> Status: **IMPLEMENTED 2026-09-03 — PR #8, rebased onto `woven/main` 3538e463c8.** T1–T6 landed;
+> the only outstanding work is T6's CNPG cluster verification, tracked on `affine-tc6.6`. Design
+> changes made during implementation are recorded as D4a/D4b (T1 review), D15/D16 (T2 review),
+> **D17–D20 (T3 review, including a showstopper: the gate crashed on every fresh install)**,
+> D21/D22 (T3 re-review), D23/D24 (T5 review) and D25 (test brittleness). The verdict table and
+> wiring below reflect all of them.
+> Bead: `affine-tc6` (P1, open, owner adam). Subtasks `.1`–`.6` = T1–T6 below;
+> `.1`–`.5` closed, `.6` open pending the CNPG cluster drill.
 > Cross-refs: infra beads `infra-zptb.6` (restore drill), `infra-zptb.8` (decommission).
 > Decisions: [findings/decision-log.md](findings/decision-log.md) · Grounding:
 > [findings/grounding.md](findings/grounding.md) · Open questions:
@@ -32,8 +34,8 @@ server at the _wrong_ populated database is detected instead of half-migrated.
 | Doc                                                      | What                                                                                                                                      |
 | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | [findings/grounding.md](findings/grounding.md)           | Verified facts, all measured on this tree: deployment topology, migration-corpus scan, `app_configs` namespace hazard, Nest boot ordering |
-| [findings/decision-log.md](findings/decision-log.md)     | D1–D22, plus D4a and D4b                                                                                                                  |
-| [findings/open-questions.md](findings/open-questions.md) | OQ-1, OQ-2 resolved 2026-09-01; OQ-3 (CI gating) and OQ-4 (data migrations) open                                                          |
+| [findings/decision-log.md](findings/decision-log.md)     | D1–D25, plus D4a and D4b                                                                                                                  |
+| [findings/open-questions.md](findings/open-questions.md) | OQ-1, OQ-2 resolved 2026-09-01; OQ-3 (CI gating), OQ-4 (data migrations), OQ-5 (a dev-CLI exit 139) open                                  |
 | [PLAN.md](PLAN.md)                                       | The task-by-task implementation plan derived from this design                                                                             |
 
 ## Why the enforcement point is what it is
@@ -69,9 +71,9 @@ row. All judgement sits in the two pure modules.
 | `identity.ts`      | Read/write the deployment stamp in `app_configs`.                                   | Prisma          |
 | `env.ts`           | The three `process.env` reads, in one place (D13).                                  | nothing         |
 | `service.ts`       | `DbCompatService` plus the pure `decide()` adoption gate.                           | above           |
-| `guard.ts`         | `OnApplicationBootstrap` → refuse to listen; pure `enforce()`.                      | service         |
+| `guard.ts`         | `assertDatabaseCompatible()` called from `server.ts`; pure `enforce()` (D23).       | service         |
 | `render.ts`        | Format a `CompatReport` as operator-readable text.                                  | nothing (pure)  |
-| `index.ts`         | `DbCompatModule` + `DbCompatGuardModule` + public types (D14).                      | —               |
+| `index.ts`         | `DbCompatModule` (service only) + public types.                                     | —               |
 | `cli-module.ts`    | `DbCompatCliModule` — the config+prisma-only CLI context (D7).                      | —               |
 
 ## Verdicts
@@ -139,12 +141,15 @@ each of those four needs an answer that is neither "adopt" nor a crash. Nine ver
 
 ## DDL classification (tiers)
 
-Measured by running a prototype of `classify.ts` over all 117 real migrations (G2a). **These are
-the numbers T1 asserts:**
+Measured by running the classifier over all 117 real migrations, 2026-09-01 (G2a):
 
 ```
 total=117  BLOCKING=17  DESTRUCTIVE=14  EXPAND=86
 ```
+
+**This is a dated data point, not a test fixture (D25).** The tests assert invariants — total
+accounting, monotonic per-tier floors, and a per-rule "still fires" check — because an exact count
+would break on every upstream merge that adds a migration, and break uninformatively.
 
 One tier would not be enough: **8 of the 14 `DESTRUCTIVE` migrations carry `drop-constraint` with
 no blocking rule**, and an older binary reads and writes past a dropped foreign key without

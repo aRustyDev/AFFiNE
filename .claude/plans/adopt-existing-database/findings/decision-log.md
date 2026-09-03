@@ -331,6 +331,55 @@ calls; D5–D10 follow from them plus the grounding measurements.
   The lesson generalises: "the deployment calls X" is a claim about **one** deployment. Enumerate
   the callers. _Status: accepted (T5 review)._
 
+- **D25 — the corpus tests assert INVARIANTS, not the measured distribution.** The first version
+  asserted `{ BLOCKING: 17, DESTRUCTIVE: 14, EXPAND: 86 }` of exactly 117, plus a separate
+  `names.length === 117`. Operator review caught the flaw: upstream adds migrations on every merge,
+  so both tests would break on each one — and break **uninformatively**. "Expected 117, got 118"
+  says nothing about whether the classifier is still correct, and the only sensible remedy is to
+  edit the number. An assertion that must be edited routinely trains people to edit it without
+  thinking, which is worse than no assertion — and it made the "do not soften this" comment beside
+  it into noise.
+
+  Root cause: two different jobs were conflated. The tests should protect the **rule set**; the
+  merge-checklist `db status` step covers **new content**. Only the first belongs in a fixture.
+
+  Replaced with three invariants:
+  1. **Total accounting** — `BLOCKING + DESTRUCTIVE + EXPAND === names.length`, catching a
+     classifier that throws or returns an unexpected tier.
+  2. **Monotonic floors** — `BLOCKING >= 17`, `DESTRUCTIVE >= 14`. Sound because prisma migration
+     directories are **append-only**: applied migrations are immutable history, so a tier's
+     population can only grow. No floor on `EXPAND`, which grows with every additive migration and
+     so asserts nothing about the rules.
+  3. **Per-rule "still fires"** — for the 7 rules with real corpus coverage (`drop-constraint`,
+     `drop-index`, `drop-table`, `drop-column`, `retype-column`, `set-not-null`, `delete-from`).
+     Stronger than any aggregate and it does not decay as the corpus grows: a floor could stay
+     satisfied while one specific rule silently died. `rename-table`, `rename-column` and
+     `truncate` match nothing in this repo's history and stay unit-test-only.
+
+  Over-detection is covered by the four named anchors, which are unchanged — if a rule turned
+  greedy, `converge_copilot_runtime` stops being DESTRUCTIVE-not-BLOCKING, or the function-body-only
+  migrations stop being EXPAND.
+
+  The asymmetry is the point: **bumping a floor up is a safe, optional tightening; editing an exact
+  count is mandatory and thoughtless.**
+
+  Both halves were verified rather than argued. Neutering `drop-table`'s pattern failed the floor
+  test ("BLOCKING fell to 13, below the measured floor of 17") and the per-rule test ("rule
+  drop-table no longer matches any migration in the corpus"), so the invariants have teeth. Adding
+  two simulated upstream migrations — one additive, one contracting — left all 43 tests passing with
+  no edits, where the old design would have failed two.
+
+  `migration-set.spec`'s `117` was incidental: that test exists to prove `resolveMigrationsDir()`
+  finds the real directory. It now asserts shape — non-empty, `migration_lock.toml` present, names
+  sorted and matching `/^\d{14}[_-]\S+$/`, every `migration.sql` readable. Measuring first was
+  worth it: `20250303105325-notification` separates with a **hyphen**, so an assumed `_` would have
+  been wrong.
+
+  A checked-in golden file of name → tier was considered as the stronger alternative. Rejected: its
+  real benefit is per-migration pinning, which the anchors already provide for the cases that
+  matter, at the cost of ~117 lines of committed data plus a regeneration step at every merge.
+  _Status: accepted (operator, 2026-09-03)._
+
 ## Rejected approaches
 
 - **All logic in `self-host-predeploy.js` as plain JS.** No app-graph coupling and it would run

@@ -258,18 +258,24 @@ test('a hit statement is not truncated even when long (issue 7)', t => {
   t.true(hit!.statement.includes('TYPE INTEGER'));
 });
 
-// --- corpus anchors and totals, measured in grounding G2a -------------------
-// These are the regression fixtures the tiering exists for. Do not soften them
-// to make a rule-set change pass; if a number here moves, re-measure and say so.
+// --- corpus assertions: INVARIANTS, not a snapshot -------------------------
 //
-// 17/14/86 as of the quoted-identifier scrub (code review round on
-// affine-tc6.1). The earlier 18/14/85 baseline included a false-positive
-// BLOCKING on 20250203142831_standardize_features, where `retype-column`
-// (`/\bALTER\s+COLUMN\b.*?\bTYPE\b/i`) matched the quoted column name "type"
-// instead of a real TYPE keyword — that migration only adds columns, sets
-// defaults, and creates indexes, so EXPAND is correct. Scrubbing double-quoted
-// identifiers (issue 2b) removed the false positive; this is a correction to
-// the measured evidence, not a relaxation of it.
+// These protect the RULE SET. They deliberately do NOT assert the corpus size or
+// the exact tier distribution, because upstream adds migrations on every merge
+// and an exact count would fail on each one — uninformatively ("expected 117,
+// got 118" says nothing about whether the classifier is still correct) and with
+// the only sensible remedy being to edit the number. An assertion that must be
+// edited routinely trains people to edit it without thinking, which is worse
+// than no assertion.
+//
+// New CONTENT is covered elsewhere: merge-checklist step 2 in
+// scripts/woven-patch-manifest.md runs `db status` over the incoming migrations.
+// That is a different job from protecting the rules, and conflating the two is
+// what produced the brittle version of this file.
+//
+// The measured distribution as of 2026-09-01 — 17 BLOCKING / 14 DESTRUCTIVE /
+// 86 EXPAND of 117 — is recorded in findings/grounding.md G2a as a dated data
+// point. The evidence trail lives there; the brittleness does not live here.
 
 const MIGRATIONS_DIR = join(import.meta.dirname, '../../../../migrations');
 
@@ -279,16 +285,87 @@ const corpus = () =>
     .map(d => d.name)
     .sort();
 
-test('corpus tiers exactly as measured: 17 / 14 / 86 of 117', t => {
+const classifyCorpus = () => {
   const counts = { BLOCKING: 0, DESTRUCTIVE: 0, EXPAND: 0 };
-  for (const name of corpus()) {
-    const sql = readFileSync(
-      join(MIGRATIONS_DIR, name, 'migration.sql'),
-      'utf8'
+  const firedRules = new Set<string>();
+  const names = corpus();
+
+  for (const name of names) {
+    const { tier, hits } = classifyDdl(
+      readFileSync(join(MIGRATIONS_DIR, name, 'migration.sql'), 'utf8')
     );
-    counts[classifyDdl(sql).tier]++;
+    counts[tier]++;
+    for (const hit of hits) {
+      firedRules.add(hit.rule);
+    }
   }
-  t.deepEqual(counts, { BLOCKING: 17, DESTRUCTIVE: 14, EXPAND: 86 });
+
+  return { counts, firedRules, total: names.length };
+};
+
+test('every migration is accounted for in exactly one tier', t => {
+  const { counts, total } = classifyCorpus();
+  t.is(
+    counts.BLOCKING + counts.DESTRUCTIVE + counts.EXPAND,
+    total,
+    'a migration that classified as nothing means classifyDdl returned an ' +
+      'unexpected tier or threw'
+  );
+  t.true(total > 0, 'the corpus should not be empty');
+});
+
+// Floors, not equalities. Prisma migration directories are append-only —
+// applied migrations are immutable history — so a tier's population can only
+// grow as upstream merges land. `>=` is therefore sound AND stable, and it
+// still catches the regression that matters: a rule silently stopping firing.
+//
+// Bumping a floor UP is a safe, optional tightening. That asymmetry is the
+// whole point: nothing here ever *has* to be edited to make an unrelated
+// upstream merge pass.
+//
+// If one of these ever fails, the corpus shrank — upstream squashed migrations,
+// or a rule regressed. Both are worth stopping for.
+const FLOOR_BLOCKING = 17;
+const FLOOR_DESTRUCTIVE = 14;
+
+test('the corpus still yields at least the measured floor per gating tier', t => {
+  const { counts } = classifyCorpus();
+  t.true(
+    counts.BLOCKING >= FLOOR_BLOCKING,
+    `BLOCKING fell to ${counts.BLOCKING}, below the measured floor of ${FLOOR_BLOCKING}`
+  );
+  t.true(
+    counts.DESTRUCTIVE >= FLOOR_DESTRUCTIVE,
+    `DESTRUCTIVE fell to ${counts.DESTRUCTIVE}, below the measured floor of ${FLOOR_DESTRUCTIVE}`
+  );
+  // No floor on EXPAND: it grows with every additive migration, so a floor
+  // there asserts nothing about the rules.
+});
+
+// Stronger than any aggregate, and it does not decay as the corpus grows: an
+// aggregate floor can stay satisfied while one specific rule dies. Only the
+// seven rules with real corpus coverage are listed — `rename-table`,
+// `rename-column` and `truncate` match nothing in this repo's history and are
+// covered by the unit tests above instead. Measured 2026-09-01.
+const RULES_WITH_CORPUS_COVERAGE = [
+  'drop-constraint',
+  'drop-index',
+  'drop-table',
+  'drop-column',
+  'retype-column',
+  'set-not-null',
+  'delete-from',
+] as const;
+
+test('every rule with corpus coverage still fires on a real migration', t => {
+  const { firedRules } = classifyCorpus();
+  for (const rule of RULES_WITH_CORPUS_COVERAGE) {
+    t.true(
+      firedRules.has(rule),
+      `rule "${rule}" no longer matches any migration in the corpus — it ` +
+        `matched at least one when measured, so this is a detection regression`
+    );
+  }
 });
 
 test('anchor: drop_legacy_permission_and_subscription is BLOCKING', t => {

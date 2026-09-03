@@ -1,4 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -75,8 +81,35 @@ test('loadMigrationSet returns null for an unknown name rather than throwing', t
   t.is(loadMigrationSet(dir)!.sql('nope'), null);
 });
 
-test('the real repository migrations directory resolves and has 117 entries', t => {
+// This test exists to prove `resolveMigrationsDir()` finds the REAL directory
+// from a test's working directory — the count was incidental, and asserting it
+// meant an upstream merge that adds a migration broke this file for no reason.
+// Assert the shape instead, which is what "we found the right directory" means.
+test('the real repository migrations directory resolves and looks like one', t => {
   const dir = resolveMigrationsDir();
-  t.truthy(dir);
-  t.is(loadMigrationSet(dir!)!.names.length, 117);
+  t.truthy(dir, 'resolveMigrationsDir() found no candidate');
+
+  const set = loadMigrationSet(dir!);
+  t.truthy(set);
+  t.true(set!.names.length > 0, 'the real corpus should not be empty');
+
+  // Prisma names a migration <14-digit timestamp><separator><slug>. Note the
+  // separator is not always `_`: 20250303105325-notification uses a hyphen.
+  const misshapen = set!.names.filter(n => !/^\d{14}[_-]\S+$/.test(n));
+  t.deepEqual(misshapen, [], 'every entry should be a prisma migration name');
+
+  // `names` is documented as prisma's own apply order, so it must be sorted.
+  t.deepEqual(set!.names, [...set!.names].sort());
+
+  // The discriminator the resolver requires, so this really is a prisma dir.
+  t.true(existsSync(join(dir!, 'migration_lock.toml')));
+
+  // Every entry is readable — a directory whose migration.sql is missing would
+  // return null and be gated as unreadable, which should not be true of ours.
+  const unreadable = set!.names.filter(n => set!.sql(n) === null);
+  t.deepEqual(
+    unreadable,
+    [],
+    'every migration should have a readable sql file'
+  );
 });
