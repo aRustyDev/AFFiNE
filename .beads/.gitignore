@@ -1,0 +1,10 @@
+# beads local-only files, no need to track
+.local_version
+last-touched
+
+# Audit log. bd has no knob to disable it, and on a shared Dolt server it is a
+# regenerated projection of the server-side `interactions` table — every write
+# command rewrites it with EVERY actor's activity, not just this checkout's.
+# Tracking it means an unrelated diff waiting in the tree after every bd write.
+# The data is not lost: it lives in the database, queryable via `bd show <id>`.
+interactions.jsonl

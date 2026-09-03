@@ -1,0 +1,20 @@
+# Beads client config — shared Dolt server at bd.agents.woven (WARP-only).
+# Commit this file. It contains no secrets and no personal identity.
+
+dolt.host: 'bd.agents.woven'
+dolt.port: 3306
+
+# It IS a shared server ...
+dolt.shared-server: true
+# ... but externally managed. Without this, bd starts a LOCAL dolt whose .port
+# files shadow the configured 3306 — the cause of any "bd is dialling :13307".
+dolt.auto-start: false
+
+# bd's auto-backup writes to the DATABASE's filesystem, which on a shared server
+# belongs to the host, not you. It can never succeed and warns on every command,
+# including read-only ones. Durability is the server-side daily R2 backup CronJob.
+backup:
+  enabled: false
+
+# Deliberately NO `dolt.user` key. Identity comes from BEADS_DOLT_SERVER_USER per
+# person, so this shared committed file cannot pin everyone to one identity.
