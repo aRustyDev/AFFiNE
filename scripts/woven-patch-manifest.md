@@ -57,9 +57,10 @@ judge a branch that fails them. A manifest row the parser cannot read would
 otherwise silently drop its file out of the FORK-LOCAL set, so the leak check
 would pass by omission; requiring inbound-clean first means that class of parser
 gap fails closed instead. `--dump-rows` prints exactly what the parser and
-classifier saw for each row — path and resolved category, or the raw line if it
-did not parse — useful for debugging a rejected row or confirming a path is
-paired with the category you expect.
+classifier saw for each row — tab-separated path, resolved category, resolved
+State, and a `MOVED` row's destination (empty otherwise) — or the raw line if it
+did not parse. Useful for debugging a rejected row, or for confirming a path is
+paired with the category and State you expect.
 
 To prepare a contribution for upstream, do not branch from `woven/main` — it
 carries every fork-local patch the fork has ever made. Use:

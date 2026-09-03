@@ -72,7 +72,7 @@
 # manifest text — an inverted ADDITIVE/FORK-LOCAL CORE PATCH classification
 # would show up here; destination is empty unless state is MOVED), or
 # `!UNPARSED<TAB><raw line>` for one that didn't parse — then exits 0 without
-# running any of the four checks above. It answers "what did the parser and
+# running any of the checks above. It answers "what did the parser and
 # classifier actually see?", which is exactly the question you want answered
 # when a row gets rejected, or when you want to confirm a path is paired with
 # the category you think it is before trusting that pairing.
@@ -282,7 +282,7 @@ FORKLOCAL="$(printf '%s' "$CLASSIFIED" | awk -F'\t' '
 # Prints what the parser AND the classifier saw — `path<TAB>category<TAB>state
 # <TAB>destination` per row (destination empty unless MOVED),
 # `!UNPARSED<TAB><raw line>` for one that didn't parse — then exits before any
-# of the four checks below can fail the guard. Use it to see exactly what
+# of the checks below can fail the guard. Use it to see exactly what
 # a rejected row looked like, or to confirm a path is paired with the category
 # you think it is before trusting that pairing.
 if [ "$DUMP_ROWS" -eq 1 ]; then
