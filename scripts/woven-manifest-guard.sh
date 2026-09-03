@@ -44,8 +44,11 @@
 #                         was never put there, or the destination is a typo
 #                         that happens to name an existing directory.
 #   Every offending path is printed, so the fix is mechanical rather than a
-#   re-audit. Rows for files that no longer diverge are reported as a WARNING
-#   only — harmless staleness, not a reason to block a PR.
+#   re-audit. A row that is not an upstream-owned divergence at the current
+#   baseline — the file no longer differs, or upstream deleted/renamed it, or
+#   the row names a fork-owned file — is reported as a WARNING only. It cannot
+#   hide a patch (the path is still in CHANGED, so the outbound leak check
+#   still sees it), so it is not a reason to block a PR.
 #
 # EXIT CODES (contract — see scripts/woven-manifest-guard.test.sh)
 #   0  clean
@@ -617,8 +620,17 @@ if [ -n "$MOVED_GONE" ]; then
 fi
 
 if [ -n "$UNDIVERGED" ]; then
-  warn "manifest row(s) for files that no longer diverge from the baseline (not fatal — consider dropping the row):"
+  # The path is present, but it is not in UPSTREAM_OWNED — which folds in two
+  # different situations, so the message must name both rather than assert the
+  # first. Saying only "no longer diverges" is wrong for the second: after
+  # upstream deletes or renames a file the fork had patched, the fork's copy
+  # still differs from what upstream shipped — upstream simply has no such file
+  # at this baseline any more. (affine-83p)
+  warn "manifest row(s) that are not an upstream-owned divergence at this baseline (not fatal — consider dropping the row):"
   while IFS= read -r p; do [ -n "$p" ] && warn "    $p"; done <<< "$UNDIVERGED"
+  warn "  Either the file no longer differs from upstream, or it is no longer"
+  warn "  upstream-owned — upstream deleted or renamed it, or the row names a"
+  warn "  fork-owned file. Either way the row describes nothing this baseline has."
 fi
 
 if [ "$rc" -eq 0 ]; then
