@@ -303,8 +303,64 @@ const classifyCorpus = () => {
   return { counts, firedRules, total: names.length };
 };
 
+// --- the only knobs in this file -------------------------------------------
+//
+// Everything the corpus tests compare against lives here, so re-tightening is
+// one edit in one place. NOTE THAT NONE OF IT EVER *HAS* TO BE EDITED: prisma
+// migration directories are append-only (applied migrations are immutable
+// history), so no upstream merge can push a count DOWN or stop a rule firing.
+// Raising a floor is an optional tightening, never a merge chore.
+//
+// The floors do go slack as the corpus grows — a floor of 17 against 117
+// migrations is a tighter claim than the same 17 against 400. Re-measuring is
+// therefore worth doing occasionally, and `measured` below dates the last time
+// anyone did.
+//
+// TO RE-MEASURE: run this spec and read the `corpus:` line the accounting test
+// logs. Verified to print under a non-TTY run; add `--verbose` if your local
+// reporter hides logs for passing tests.
+//
+//   yarn affine @affine/server test src/core/db-compat/__tests__/classify.spec.ts
+//
+// Then raise the floors to the printed counts and update `measured`. Do NOT
+// lower a floor to make a failure go away — a falling count means the corpus
+// shrank (upstream squashed migrations) or a rule regressed. Both are worth
+// stopping for.
+const MEASURED = {
+  measured: '2026-09-01',
+
+  // Floors, not equalities, per the append-only argument above. No floor on
+  // EXPAND: it grows with every additive migration, so a floor there asserts
+  // nothing about the rules.
+  floors: { BLOCKING: 17, DESTRUCTIVE: 14 },
+
+  // Stronger than any aggregate, and it does not decay as the corpus grows: an
+  // aggregate floor can stay satisfied while one specific rule dies. Only the
+  // rules with real corpus coverage are listed — `rename-table`,
+  // `rename-column` and `truncate` match nothing in this repo's history and
+  // are covered by the unit tests above instead.
+  rulesWithCorpusCoverage: [
+    'drop-constraint',
+    'drop-index',
+    'drop-table',
+    'drop-column',
+    'retype-column',
+    'set-not-null',
+    'delete-from',
+  ],
+} as const;
+
 test('every migration is accounted for in exactly one tier', t => {
   const { counts, total } = classifyCorpus();
+
+  // Logged, not asserted. This is the re-measurement readout: it keeps the
+  // current numbers one command away without making them a pass condition.
+  t.log(
+    `corpus: total=${total} BLOCKING=${counts.BLOCKING} ` +
+      `DESTRUCTIVE=${counts.DESTRUCTIVE} EXPAND=${counts.EXPAND} ` +
+      `(floors last measured ${MEASURED.measured})`
+  );
+
   t.is(
     counts.BLOCKING + counts.DESTRUCTIVE + counts.EXPAND,
     total,
@@ -314,52 +370,22 @@ test('every migration is accounted for in exactly one tier', t => {
   t.true(total > 0, 'the corpus should not be empty');
 });
 
-// Floors, not equalities. Prisma migration directories are append-only —
-// applied migrations are immutable history — so a tier's population can only
-// grow as upstream merges land. `>=` is therefore sound AND stable, and it
-// still catches the regression that matters: a rule silently stopping firing.
-//
-// Bumping a floor UP is a safe, optional tightening. That asymmetry is the
-// whole point: nothing here ever *has* to be edited to make an unrelated
-// upstream merge pass.
-//
-// If one of these ever fails, the corpus shrank — upstream squashed migrations,
-// or a rule regressed. Both are worth stopping for.
-const FLOOR_BLOCKING = 17;
-const FLOOR_DESTRUCTIVE = 14;
-
 test('the corpus still yields at least the measured floor per gating tier', t => {
   const { counts } = classifyCorpus();
-  t.true(
-    counts.BLOCKING >= FLOOR_BLOCKING,
-    `BLOCKING fell to ${counts.BLOCKING}, below the measured floor of ${FLOOR_BLOCKING}`
-  );
-  t.true(
-    counts.DESTRUCTIVE >= FLOOR_DESTRUCTIVE,
-    `DESTRUCTIVE fell to ${counts.DESTRUCTIVE}, below the measured floor of ${FLOOR_DESTRUCTIVE}`
-  );
-  // No floor on EXPAND: it grows with every additive migration, so a floor
-  // there asserts nothing about the rules.
+  for (const [tier, floor] of Object.entries(MEASURED.floors)) {
+    const actual = counts[tier as keyof typeof counts];
+    t.true(
+      actual >= floor,
+      `${tier} fell to ${actual}, below the floor of ${floor} measured ` +
+        `${MEASURED.measured}. The corpus shrank or a rule regressed — do ` +
+        `not lower the floor to make this pass.`
+    );
+  }
 });
-
-// Stronger than any aggregate, and it does not decay as the corpus grows: an
-// aggregate floor can stay satisfied while one specific rule dies. Only the
-// seven rules with real corpus coverage are listed — `rename-table`,
-// `rename-column` and `truncate` match nothing in this repo's history and are
-// covered by the unit tests above instead. Measured 2026-09-01.
-const RULES_WITH_CORPUS_COVERAGE = [
-  'drop-constraint',
-  'drop-index',
-  'drop-table',
-  'drop-column',
-  'retype-column',
-  'set-not-null',
-  'delete-from',
-] as const;
 
 test('every rule with corpus coverage still fires on a real migration', t => {
   const { firedRules } = classifyCorpus();
-  for (const rule of RULES_WITH_CORPUS_COVERAGE) {
+  for (const rule of MEASURED.rulesWithCorpusCoverage) {
     t.true(
       firedRules.has(rule),
       `rule "${rule}" no longer matches any migration in the corpus — it ` +
