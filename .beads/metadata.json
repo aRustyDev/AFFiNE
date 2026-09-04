@@ -1,0 +1,8 @@
+{
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_server_host": "bd.agents.woven",
+  "dolt_server_port": 3306,
+  "dolt_server_tls": true,
+  "dolt_database": "affine"
+}
