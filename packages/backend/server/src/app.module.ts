@@ -31,6 +31,7 @@ import { AuthModule } from './core/auth';
 import { BackendRuntimeModule } from './core/backend-runtime';
 import { CommentModule } from './core/comment';
 import { ServerConfigModule, ServerConfigResolverModule } from './core/config';
+import { DbCompatModule } from './core/db-compat';
 import { DocStorageModule } from './core/doc';
 import { DocRendererModule } from './core/doc-renderer';
 import { DocServiceModule } from './core/doc-service';
@@ -161,6 +162,16 @@ export function buildAppModule(env: Env) {
   factor
     // basic
     .use(...FunctionalityModules)
+
+    // affine-tc6: `DbCompatModule` provides `DbCompatService` only — no
+    // bootstrap hook, no side effects — so `server.ts`'s
+    // `assertDatabaseCompatible` can resolve it via `app.get()` between
+    // `NestFactory.create()` and `app.listen()`. Deliberately NOT relying on
+    // `FunctionalityModules` (which `CliAppModule` also imports) for this:
+    // `DbCompatModule` is documented as safe to import anywhere, but keeping
+    // it out of the shared array anyway means this line's presence or
+    // absence can never affect what the CLI can reach.
+    .use(DbCompatModule)
 
     // enable indexer module on graphql, doc and front service
     .useIf(
