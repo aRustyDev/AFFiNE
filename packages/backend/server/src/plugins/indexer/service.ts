@@ -155,6 +155,19 @@ export class IndexerService {
       await searchProvider.recreateTable(table, mappings[table]);
     }
 
+    await this.requeueAllWorkspacesForIndexing();
+  }
+
+  /**
+   * WOVEN FORK-LOCAL (bead affine-adi). Marks every workspace unindexed and queues a
+   * reindex for each.
+   *
+   * Extracted from rebuildManticoreIndexes so schema-drift repair shares it. Dropping
+   * a table WITHOUT this leaves every workspace at `indexed = true`, and
+   * `indexer.autoIndexWorkspaces` skips those — so search would stay empty forever.
+   * The two steps belong together.
+   */
+  private async requeueAllWorkspacesForIndexing() {
     let lastWorkspaceSid = 0;
     while (true) {
       const workspaces = await this.models.workspace.list(
@@ -186,6 +199,91 @@ export class IndexerService {
 
       lastWorkspaceSid = workspaces[workspaces.length - 1].sid;
     }
+  }
+
+  /**
+   * WOVEN FORK-LOCAL (bead affine-adi). Detects and repairs Manticore schema drift,
+   * returning the tables it rebuilt.
+   *
+   * THE PROBLEM THIS REPLACES. `blockSQL` is `CREATE TABLE IF NOT EXISTS`, and
+   * `createTables()` is only ever called from a data migration, so a table created
+   * before an upstream commit that adds columns never gains them and nothing repairs
+   * it. Upstream's own answer is a migration per schema change
+   * (1763800000000-rebuild-manticore-mixed-script-indexes), but upstream FORGOT for
+   * ee899a267b (#15448) — which added unit_id, projection_version, source_hash,
+   * visibility, element_id, frame_id and source_block_id — and that omission is what
+   * broke doc search on the woven deployment. A mechanism that depends on upstream
+   * remembering has already failed once, so detect the drift instead of scheduling a
+   * fix for each occurrence.
+   *
+   * EXPECTED COLUMNS come from the Zod table schemas rather than from parsing the
+   * CREATE TABLE string: `write()` does `schema.parse(mapKeys(d, snakeCase))`, so those
+   * keys ARE the snake_case column names, which makes them the authority on what the
+   * write path can produce. A column the schema can write but the table lacks is data
+   * loss on write and `undefined` on read; that is exactly the drift worth repairing.
+   *
+   * EXTRA columns are deliberately NOT drift. Upstream removing a column leaves a
+   * harmless unused column behind, and rebuilding for that would empty search for no
+   * benefit.
+   *
+   * Repair runs automatically and unconditionally on drift. That is safe because a
+   * table missing columns means search is ALREADY wrong — crashing before the guards
+   * in searchDocsByKeyword, silently degraded after them — so a rebuild moves it from
+   * wrong to right. The transient empty-search window is the cost of that transition,
+   * not a regression against a working index. It is logged at warn precisely because
+   * it is user-visible while it runs.
+   */
+  async repairManticoreSchemaDrift(): Promise<SearchTable[]> {
+    let searchProvider: SearchProvider | undefined;
+    try {
+      searchProvider = this.factory.get();
+    } catch (err) {
+      if (err instanceof SearchProviderNotFound) {
+        this.logger.debug('No search provider found, skip drift check');
+        return [];
+      }
+      throw err;
+    }
+
+    if (!(searchProvider instanceof ManticoresearchProvider)) {
+      // Elasticsearch adds unknown fields from its mapping without a rebuild, so this
+      // failure mode is Manticore-specific.
+      return [];
+    }
+
+    const mappings = SearchTableMappingStrings[searchProvider.type];
+    const repaired: SearchTable[] = [];
+
+    for (const table of Object.keys(mappings) as SearchTable[]) {
+      const expected = Object.keys(SearchTableSchema[table].shape);
+      const actual = new Set(await searchProvider.listTableColumns(table));
+      if (actual.size === 0) {
+        // No such table yet — a fresh install, not drift. createTable will build it
+        // with the current schema.
+        continue;
+      }
+
+      const missing = expected.filter(column => !actual.has(column));
+      if (!missing.length) {
+        continue;
+      }
+
+      this.logger.warn(
+        `Manticore table "${table}" is missing ${missing.length} column(s) the write schema declares: ${missing.join(', ')}. ` +
+          `Rebuilding it and requeueing every workspace — SEARCH WILL RETURN EMPTY RESULTS until reindexing completes.`
+      );
+      await searchProvider.recreateTable(table, mappings[table]);
+      repaired.push(table);
+    }
+
+    if (repaired.length) {
+      await this.requeueAllWorkspacesForIndexing();
+      this.logger.warn(
+        `Rebuilt Manticore table(s) ${repaired.join(', ')} and requeued all workspaces for reindexing.`
+      );
+    }
+
+    return repaired;
   }
 
   async write<T extends SearchTable>(
@@ -601,12 +699,22 @@ export class IndexerService {
 
     for (const bucket of result.buckets) {
       const docId = bucket.key;
-      const blockId = bucket.hits.nodes[0].fields.blockId[0] as string;
-      const unitId = bucket.hits.nodes[0].fields.unitId[0] as string;
+      // WOVEN FORK-LOCAL (bead affine-adi). Every field read below is optional-chained
+      // before the subscript. A block indexed before upstream ee899a267b (#15448)
+      // carries none of the fields that commit added -- unitId, projectionVersion,
+      // sourceHash, visibility -- so the provider omits those keys entirely and a bare
+      // `[0]` threw "Cannot read properties of undefined (reading '0')", failing the
+      // WHOLE query on one stale row. Measured on the woven deployment 2026-09-03:
+      // zero-hit searches succeeded, any search with a hit returned a 500.
+      // elementId/frameId/sourceBlockId/highlights were already guarded here; the rest
+      // were not, and that inconsistency was the bug. A stale row must degrade a single
+      // result, never the query.
+      const blockId = bucket.hits.nodes[0].fields.blockId?.[0] as string;
+      const unitId = bucket.hits.nodes[0].fields.unitId?.[0] as string;
       const projectionVersion = bucket.hits.nodes[0].fields
-        .projectionVersion[0] as number;
-      const sourceHash = bucket.hits.nodes[0].fields.sourceHash[0] as string;
-      const visibility = bucket.hits.nodes[0].fields.visibility[0] as string;
+        .projectionVersion?.[0] as number;
+      const sourceHash = bucket.hits.nodes[0].fields.sourceHash?.[0] as string;
+      const visibility = bucket.hits.nodes[0].fields.visibility?.[0] as string;
       const elementId = bucket.hits.nodes[0].fields.elementId?.[0] as
         | string
         | undefined;
@@ -616,14 +724,14 @@ export class IndexerService {
       const sourceBlockId = bucket.hits.nodes[0].fields.sourceBlockId?.[0] as
         | string
         | undefined;
-      const flavour = bucket.hits.nodes[0].fields.flavour[0] as string;
-      const content = bucket.hits.nodes[0].fields.content[0] as string;
-      const createdAt = bucket.hits.nodes[0].fields.createdAt[0] as Date;
-      const updatedAt = bucket.hits.nodes[0].fields.updatedAt[0] as Date;
+      const flavour = bucket.hits.nodes[0].fields.flavour?.[0] as string;
+      const content = bucket.hits.nodes[0].fields.content?.[0] as string;
+      const createdAt = bucket.hits.nodes[0].fields.createdAt?.[0] as Date;
+      const updatedAt = bucket.hits.nodes[0].fields.updatedAt?.[0] as Date;
       const createdByUserId = bucket.hits.nodes[0].fields
-        .createdByUserId[0] as string;
+        .createdByUserId?.[0] as string;
       const updatedByUserId = bucket.hits.nodes[0].fields
-        .updatedByUserId[0] as string;
+        .updatedByUserId?.[0] as string;
       const highlight = bucket.hits.nodes[0].highlights?.content?.[0] as string;
       let title = '';
 
