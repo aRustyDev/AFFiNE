@@ -18,6 +18,7 @@ import {
 } from './base';
 import { SocketIoAdapter } from './base/websocket';
 import { AuthGuard } from './core/auth';
+import { assertDatabaseCompatible } from './core/db-compat';
 import { TelemetryService } from './core/telemetry/service';
 import { serverTimingAndCache } from './middleware/timing';
 
@@ -37,6 +38,19 @@ export async function run() {
 
   const logger = app.get(AFFiNELogger);
   app.useLogger(logger);
+
+  // affine-tc6: refuse to serve traffic against an incompatible database.
+  // Deliberately placed here rather than as a module `OnApplicationBootstrap`
+  // hook: `NestFactory.create()` runs no lifecycle hooks at all, so this
+  // strictly precedes every one of them — including the native migration
+  // runners in `BackendRuntimeProvider` and `StorageRuntimeProvider`, which
+  // would otherwise mutate the database before a module-hook-based guard
+  // could ever refuse. It also means this throw happens before
+  // `app.listen()`'s callback would flush the `bufferLogs: true` buffer
+  // above, which is why the refusal's full report travels in the thrown
+  // Error's message rather than relying on the logger (see `guard.ts`).
+  await assertDatabaseCompatible(app, logger);
+
   const config = app.get(Config);
   const url = app.get(URLHelper);
   let telemetry: TelemetryService | null = null;

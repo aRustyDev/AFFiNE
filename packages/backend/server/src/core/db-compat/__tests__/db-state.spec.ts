@@ -1,0 +1,216 @@
+import { PrismaClient } from '@prisma/client';
+import test from 'ava';
+
+import { readDbState } from '../db-state';
+
+const db = new PrismaClient();
+
+function requireDatabaseUrl(): string {
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    throw new Error(
+      'DATABASE_URL must be set to run db-state.spec.ts against a real Postgres instance'
+    );
+  }
+  return url;
+}
+
+function scratchClient(schema: string): PrismaClient {
+  const url = new URL(requireDatabaseUrl());
+  url.searchParams.set('schema', schema);
+  return new PrismaClient({ datasources: { db: { url: url.toString() } } });
+}
+
+test.before(async () => {
+  await db.$connect();
+});
+
+test.after.always(async () => {
+  await db.$disconnect();
+});
+
+test('readDbState reports the real migration history', async t => {
+  const state = await readDbState(db);
+  t.true(state.hasMigrationsTable);
+  t.true(state.rows.length > 0);
+  t.true(state.rows.some(row => !row.rolledBackAt));
+  t.deepEqual(
+    state.rows.filter(row => !row.finishedAt && !row.rolledBackAt),
+    []
+  );
+});
+
+test('readDbState surfaces a missing table as hasMigrationsTable false, not a throw', async t => {
+  // Bind an EMPTY schema via the connection URL's `?schema=`, not via
+  // `SET search_path`. Prisma pools connections, so a bare SET may land on a
+  // different session than the query that follows it — a flaky test. `?schema=`
+  // is applied per connection, so it holds for every query this client makes.
+  const SCRATCH = 'db_compat_scratch';
+  // Drop before create so a leftover schema from an abnormally-terminated
+  // previous run (killed process, machine restart) doesn't turn into a
+  // duplicate-table error on this run instead of the test just working —
+  // this database may be shared with other active work.
+  await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${SCRATCH}"`);
+  const scratch = scratchClient(SCRATCH);
+
+  try {
+    const state = await readDbState(scratch);
+    // Neither _prisma_migrations nor users exists in the empty schema, so both
+    // reads must degrade rather than throw. `populated` is `null` here
+    // (undetermined) — this schema has nothing at all, not "determined to
+    // have zero users".
+    t.false(state.hasMigrationsTable);
+    t.deepEqual(state.rows, []);
+    t.is(state.populated, null);
+  } finally {
+    await scratch.$disconnect();
+    await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  }
+});
+
+test('readDbState reports populated true when the users table has rows', async t => {
+  const SCRATCH = 'db_compat_scratch_populated';
+  // See the note in the missing-table test above: drop before create keeps
+  // this idempotent across an abnormally-terminated previous run.
+  await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${SCRATCH}"`);
+  // Only `users` (the `@@map`-ed table for the User model) needs to exist for
+  // `db.user.count()` to succeed — a plain count with no filter never
+  // references specific columns, so a minimal one-column table is enough.
+  await db.$executeRawUnsafe(
+    `CREATE TABLE "${SCRATCH}"."users" (id text PRIMARY KEY)`
+  );
+  await db.$executeRawUnsafe(
+    `INSERT INTO "${SCRATCH}"."users" (id) VALUES ('scratch-user-1')`
+  );
+  const scratch = scratchClient(SCRATCH);
+
+  try {
+    const state = await readDbState(scratch);
+    t.is(state.populated, true);
+  } finally {
+    await scratch.$disconnect();
+    await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  }
+});
+
+// Important 1 (second re-review): `populated` used to mean "has any USERS"
+// (`user.count() > 0` alone). AFFiNE deliberately preserves workspaces,
+// documents, and blobs when a user is deleted — `Workspace` has no foreign
+// key to `User` at all, `Blob` cascades from `Workspace` (not `User`), and
+// `Snapshot.createdByUser`/`updatedByUser` are `onDelete: SetNull`, with the
+// schema's own comment reading "should not delete origin snapshot even if
+// user is deleted / we only delete the snapshot if the workspace is
+// deleted". A database with real workspaces and zero users — e.g. a
+// production clone with `users` truncated to scrub PII — is exactly the
+// case the adoption gate exists to protect, and used to read as `populated:
+// false`, sailing through as a "fresh install".
+test('readDbState reports populated true when the workspaces table has rows but users does not', async t => {
+  const SCRATCH = 'db_compat_scratch_workspaces_populated';
+  await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${SCRATCH}"`);
+  // `users` exists but is empty (the "truncated to scrub PII" scenario,
+  // where the table survives but every row is gone) — distinct from the
+  // table being entirely absent, which is the undetermined (`null`) case
+  // covered elsewhere.
+  await db.$executeRawUnsafe(
+    `CREATE TABLE "${SCRATCH}"."users" (id text PRIMARY KEY)`
+  );
+  await db.$executeRawUnsafe(
+    `CREATE TABLE "${SCRATCH}"."workspaces" (id text PRIMARY KEY)`
+  );
+  await db.$executeRawUnsafe(
+    `INSERT INTO "${SCRATCH}"."workspaces" (id) VALUES ('ws-1'), ('ws-2')`
+  );
+  const scratch = scratchClient(SCRATCH);
+
+  try {
+    const state = await readDbState(scratch);
+    t.is(state.populated, true);
+  } finally {
+    await scratch.$disconnect();
+    await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  }
+});
+
+test('readDbState reports populated false only when both users and workspaces are readable and empty', async t => {
+  const SCRATCH = 'db_compat_scratch_both_empty';
+  await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${SCRATCH}"`);
+  await db.$executeRawUnsafe(
+    `CREATE TABLE "${SCRATCH}"."users" (id text PRIMARY KEY)`
+  );
+  await db.$executeRawUnsafe(
+    `CREATE TABLE "${SCRATCH}"."workspaces" (id text PRIMARY KEY)`
+  );
+  const scratch = scratchClient(SCRATCH);
+
+  try {
+    const state = await readDbState(scratch);
+    t.is(state.populated, false);
+  } finally {
+    await scratch.$disconnect();
+    await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  }
+});
+
+test('readDbState reports populated null when users exists but workspaces does not (either missing is undetermined)', async t => {
+  const SCRATCH = 'db_compat_scratch_workspaces_missing';
+  await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${SCRATCH}"`);
+  await db.$executeRawUnsafe(
+    `CREATE TABLE "${SCRATCH}"."users" (id text PRIMARY KEY)`
+  );
+  // No `workspaces` table at all — a schema where one of the two tables
+  // exists and the other doesn't is itself contradictory (caught by
+  // `SCHEMA_INCOMPLETE` in `compat.ts` when migration history is present),
+  // not evidence of "empty".
+  const scratch = scratchClient(SCRATCH);
+
+  try {
+    const state = await readDbState(scratch);
+    t.is(state.populated, null);
+  } finally {
+    await scratch.$disconnect();
+    await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  }
+});
+
+test('readDbState reports populated null when migration history exists but the users table is missing', async t => {
+  // The restore/DR scenario affine-tc6 exists for: a partially-restored
+  // database that recorded migration history but is missing a core table.
+  const SCRATCH = 'db_compat_scratch_partial';
+  // See the note in the missing-table test above: drop before create keeps
+  // this idempotent across an abnormally-terminated previous run.
+  await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  await db.$executeRawUnsafe(`CREATE SCHEMA IF NOT EXISTS "${SCRATCH}"`);
+  await db.$executeRawUnsafe(`
+    CREATE TABLE "${SCRATCH}"."_prisma_migrations" (
+      id varchar(36) PRIMARY KEY,
+      checksum varchar(64) NOT NULL,
+      finished_at timestamptz,
+      migration_name varchar(255) NOT NULL,
+      logs text,
+      rolled_back_at timestamptz,
+      started_at timestamptz NOT NULL DEFAULT now(),
+      applied_steps_count integer NOT NULL DEFAULT 0
+    )
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "${SCRATCH}"."_prisma_migrations"
+      (id, checksum, finished_at, migration_name, started_at, applied_steps_count)
+    VALUES ('11111111-1111-1111-1111-111111111111', 'checksum', now(), 'm1', now(), 1)
+  `);
+  const scratch = scratchClient(SCRATCH);
+
+  try {
+    const state = await readDbState(scratch);
+    t.true(state.hasMigrationsTable);
+    t.true(state.rows.length > 0);
+    t.is(state.populated, null);
+  } finally {
+    await scratch.$disconnect();
+    await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCRATCH}" CASCADE`);
+  }
+});

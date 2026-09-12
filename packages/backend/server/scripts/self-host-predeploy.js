@@ -92,7 +92,52 @@ function fixFailedMigrations() {
   }
 }
 
+function runCompatGate() {
+  console.log('checking database compatibility.');
+  execSync('yarn cli db check', {
+    encoding: 'utf-8',
+    env: process.env,
+    stdio: 'inherit',
+  });
+}
+
+function recordAdoption() {
+  console.log('recording the deployment stamp.');
+  execSync('yarn cli db stamp', {
+    encoding: 'utf-8',
+    env: process.env,
+    stdio: 'inherit',
+  });
+}
+
 prepare();
+// Must run BEFORE the gate, not after: `compat.ts` excludes rolled-back rows
+// from `failed`, so gating first would return MIGRATION_FAILED on exactly the
+// databases this repair exists to heal, wedging those upgrades permanently.
+// It can write `rolled_back_at` onto a `_prisma_migrations` row, but that is
+// bookkeeping, not schema — no CREATE/ALTER/DROP runs until
+// `runPrismaMigrations()` below.
 fixFailedMigrations();
+// Gate before any SCHEMA-mutating migration runs (fixFailedMigrations above
+// only marks bookkeeping rows, never DDL). `execSync` throws on a non-zero
+// exit, so a refusal aborts this script: the k8s initContainer wedges in Init
+// and the old fleet keeps serving, and the compose one-shot fails before the
+// server starts.
+runCompatGate();
 runPrismaMigrations();
 runDataMigrations();
+// Record AFTER, because the stamp lives in `app_configs`, which does not exist
+// on a fresh install until `prisma migrate deploy` has run — `writeStamp` throws
+// Prisma P2021 against it (measured; design D17). The gate cannot move later:
+// refusing after a contracting migration has already been applied is useless.
+// So the two steps have to sit on opposite sides of the migration. `db stamp`
+// is idempotent, and declines to stamp if the verdict refuses.
+//
+// A `db stamp` failure here (e.g. a transient write error against
+// `app_configs`) aborts this script and wedges the deploy — deliberately.
+// On compose there is no retry (`affine_migration` has no `restart:` policy,
+// and the server gates on `service_completed_successfully`), so a migrated
+// database with no deployment stamp yet leaves the server down until the
+// operator reruns predeploy. That is a fail-closed, accepted availability
+// cost, not an oversight to fix here.
+recordAdoption();
