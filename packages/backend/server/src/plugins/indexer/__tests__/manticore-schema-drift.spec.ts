@@ -21,6 +21,7 @@ import test from 'ava';
 import { createModule } from '../../../__tests__/create-module';
 import { ConfigModule } from '../../../base/config';
 import { ServerConfigModule } from '../../../core/config';
+import { SearchProviderType } from '../config';
 import { IndexerModule, IndexerService } from '../index';
 import { ManticoresearchProvider } from '../providers';
 import { BlockSchema, DocSchema, SearchTable } from '../tables';
@@ -64,6 +65,13 @@ function fakeManticore(columnsByTable: Partial<Record<SearchTable, string[]>>) {
   const provider = Object.create(
     ManticoresearchProvider.prototype
   ) as ManticoresearchProvider & FakeManticore;
+  // `type` is an INSTANCE FIELD on ManticoresearchProvider, not a prototype property,
+  // and Object.create does not run field initializers — so it must be set by hand.
+  // Without it SearchTableMappingStrings[provider.type] is undefined and the repair
+  // loop throws on Object.keys(undefined). Object.create is still the right way to
+  // build this fake, because repairManticoreSchemaDrift gates on `instanceof
+  // ManticoresearchProvider` and a plain object literal would not pass that.
+  provider.type = SearchProviderType.Manticoresearch;
   provider.recreated = [];
   provider.listTableColumns = async (table: SearchTable) =>
     columnsByTable[table] ?? [];
