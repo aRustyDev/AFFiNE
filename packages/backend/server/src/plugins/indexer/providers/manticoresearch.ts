@@ -93,6 +93,68 @@ export class ManticoresearchProvider extends ElasticsearchProvider {
     await this.createTable(table, mapping);
   }
 
+  /**
+   * WOVEN FORK-LOCAL (bead affine-adi). The live column list for a table, used to
+   * detect schema drift against the Zod table schemas.
+   *
+   * `blockSQL` is `CREATE TABLE IF NOT EXISTS`, so a table created before an upstream
+   * commit that adds columns never gains them, and nothing in the tree repairs that:
+   * `createTables()` is only ever called from a data migration. Manticore then omits
+   * the missing keys from every hit, which is how a stale index silently degrades
+   * reads (and, before the guards in `IndexerService.searchDocsByKeyword`, crashed the
+   * whole query).
+   *
+   * Uses `/sql?mode=raw` rather than the `/cli` endpoint `#executeSQL` uses, because
+   * that returns JSON — `[{ columns: [...], data: [{ Field, Type, Properties }] }]` —
+   * instead of a pipe-delimited text table that would have to be parsed positionally.
+   * Response shape measured against Manticore 10.1.0 on the woven deployment
+   * 2026-09-08.
+   */
+  async listTableColumns(table: SearchTable): Promise<string[]> {
+    const url = `${this.config.provider.endpoint}/sql?mode=raw`;
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    };
+    if (this.config.provider.apiKey) {
+      headers.Authorization = `ApiKey ${this.config.provider.apiKey}`;
+    } else if (this.config.provider.password) {
+      headers.Authorization = `Basic ${Buffer.from(`${this.config.provider.username}:${this.config.provider.password}`).toString('base64')}`;
+    }
+
+    const response = await safeFetch(
+      url,
+      {
+        method: 'POST',
+        body: `query=${encodeURIComponent(`DESCRIBE ${table}`)}`,
+        headers,
+      },
+      INDEXER_FETCH_OPTIONS
+    );
+    const text = (await response.text()).trim();
+    if (!response.ok) {
+      this.logger.error(`failed to describe table ${table}, response: ${text}`);
+      throw new InternalServerError();
+    }
+
+    // A table that does not exist yet is not drift — it is a fresh install, and
+    // createTable will build it with the current schema.
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      this.logger.error(`could not parse DESCRIBE ${table}, response: ${text}`);
+      throw new InternalServerError();
+    }
+
+    const rows = Array.isArray(parsed) ? parsed[0]?.data : undefined;
+    if (!Array.isArray(rows)) {
+      return [];
+    }
+    return rows
+      .map(row => (row as { Field?: unknown })?.Field)
+      .filter((field): field is string => typeof field === 'string');
+  }
+
   override async write(
     table: SearchTable,
     documents: Record<string, unknown>[],

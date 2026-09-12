@@ -197,6 +197,19 @@ export class IndexerJob {
       return;
     }
 
+    // WOVEN FORK-LOCAL (bead affine-adi). Self-heal Manticore schema drift before
+    // scanning. Hooked here rather than on application bootstrap deliberately: this is
+    // a queued job, so it runs once per tick on one consumer instead of once per pod
+    // per restart, which avoids every replica racing to drop and rebuild the same
+    // tables. A healthy schema makes this two DESCRIBE calls and nothing else, so the
+    // cost of checking every tick is negligible; once repaired it stays a no-op.
+    // Failure here must not stop indexing, hence the catch.
+    try {
+      await this.service.repairManticoreSchemaDrift();
+    } catch (error) {
+      this.logger.error('Manticore schema drift check failed', error);
+    }
+
     const startSid = payload.lastIndexedWorkspaceSid ?? 0;
     const workspaces = await this.models.workspace.list(
       { sid: { gt: startSid } },
